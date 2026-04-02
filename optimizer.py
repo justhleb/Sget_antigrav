@@ -15,7 +15,6 @@ from pymoo.operators.mutation.pm import PM
 from pymoo.operators.repair.rounding import RoundingRepair
 from pymoo.optimize import minimize
 from pymoo.termination import get_termination
-# removed StarmapParallelization
 from multiprocessing.pool import ThreadPool
 import warnings
 
@@ -33,25 +32,27 @@ ROUTE_PAIRS = {
 }
 
 N_ROUTES = len(ROUTE_PAIRS)   # 3
-N_MAX    = 45                  # бюджет парка 
+N_MAX    = 30                  # бюджет парка (контрактные ограничения)
+MAX_PER_ROUTE = 12             # макс. выпуск на один маршрут
 
 
 # ─── задача оптимизации ───────────────────────────────────────────────────────
 
 class TramFleetProblem(ElementwiseProblem):
     """
-    Переменные:   x = [n_20, n_48, n_55]  — целые, диапазон [5, 30]
-    Цели:         F = [total_tram_km, headway_mae]  — минимизируем обе
+    Переменные:   x = [n_20, n_48, n_55]  — целые, диапазон [0, MAX_PER_ROUTE]
+    Цели:         F = [headway_mae, -total_revenue]  — минимизируем обе
+                     (pymoo минимизирует, поэтому revenue с минусом)
     Ограничения:  G = [sum(x) - N_MAX]  ≤ 0
     """
 
     def __init__(self, n_max: int = N_MAX, runner=None):
         super().__init__(
             n_var=N_ROUTES,
-            n_obj=3,
+            n_obj=2,
             n_ieq_constr=1,
-            xl=np.full(N_ROUTES, 5),
-            xu=np.full(N_ROUTES, 30),
+            xl=np.full(N_ROUTES, 0),            # мин 0 ТС на маршрут
+            xu=np.full(N_ROUTES, MAX_PER_ROUTE), # макс по контракту
             vtype=int,
             runner=runner,
         )
@@ -60,19 +61,19 @@ class TramFleetProblem(ElementwiseProblem):
     def _evaluate(self, x, out, *args, **kwargs):
         tram_counts = [int(v) for v in x]
 
-        # silent=True — не создаём папки на диске
         sim = MultiRouteSimulation.from_params(
             ROUTE_PAIRS,
             tram_counts=tram_counts,
-            run_dir=None,   
+            run_dir=None,
         )
         sim.run(plot_graphs=False, save_logs=False)
 
-        _, total_km, headway_mae, total_served = sim.get_objectives()
+        total_km, headway_mae, total_revenue, _ = sim.get_objectives()
 
-        out["F"] = np.array([-total_km, headway_mae, -total_served], dtype=float)
+        # pymoo минимизирует → revenue инвертируем
+        out["F"] = np.array([headway_mae, -total_revenue], dtype=float)
         out["G"] = np.array([sum(tram_counts) - self.n_max], dtype=float)
-        
+
         del sim
 
 
@@ -90,10 +91,10 @@ def run_nsga2(
     run_dir = os.path.join(out_dir, f"run_{ts}")
     os.makedirs(run_dir, exist_ok=True)
 
-    n_threads = 8  # Можно поменять в зависимости от процессора
+    n_threads = 8
     pool = ThreadPool(n_threads)
     runner = pool.starmap
-    
+
     problem = TramFleetProblem(n_max=n_max, runner=runner)
 
     algorithm = NSGA2(
@@ -129,23 +130,22 @@ def run_nsga2(
 
 def _save_results(res, out_dir: str):
     X = res.X   # переменные: [n_20, n_48, n_55]
-    F = res.F   # цели:       [total_km, headway_mae]
+    F = res.F   # цели:       [headway_mae, -total_revenue]
 
     if X is None or F is None:
-        print("\n[Внимание] Не найдено ни одного допустимого решения (возможно, слишком строгие ограничения, например n_max).")
+        print("\n[Внимание] Не найдено ни одного допустимого решения.")
         return
 
     # CSV
     df = pd.DataFrame(
         np.hstack([X, F]),
-        columns=["n_20", "n_48", "n_55", "total_tram_km_neg", "headway_mae_min", "total_served_neg"],
+        columns=["n_20", "n_48", "n_55", "headway_mae_min", "total_revenue_neg"],
     )
-    df["total_tram_km"] = -df["total_tram_km_neg"]
-    df["total_served"]  = -df["total_served_neg"]
-    df = df.drop(columns=["total_tram_km_neg", "total_served_neg"])   # возвращаем знак обратно
+    df["total_revenue"] = -df["total_revenue_neg"]
+    df = df.drop(columns=["total_revenue_neg"])
     df["total_trams"] = df[["n_20", "n_48", "n_55"]].sum(axis=1)
 
-    df = df.sort_values("total_tram_km")
+    df = df.sort_values("total_revenue", ascending=False)
     csv_path = os.path.join(out_dir, "pareto_front.csv")
     df.to_csv(csv_path, index=False)
     print(f"\nPareto-фронт сохранён: {csv_path}")
@@ -164,4 +164,4 @@ def _save_results(res, out_dir: str):
 # ─── точка входа ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    run_nsga2(n_max=45, pop_size=25, n_gen=5)
+    run_nsga2(n_max=30, pop_size=25, n_gen=5)

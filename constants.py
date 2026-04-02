@@ -4,3 +4,4 @@ PEAK_ALIGHT_MULT     = 2.0
 END_BONUS_MAX        = 0.30
 MAX_ALIGHT_RATE      = 0.80
 BOARDING_MIN_PER_PAX = 0.02
+DEFAULT_STOP_DWELL_MIN = 1.0   # фиксированное среднее время стоянки (мин)

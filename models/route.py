@@ -16,7 +16,7 @@ import simpy
 
 from models.stop import Stop, StopEvent
 from models.tram import Tram
-from constants import BOARDING_MIN_PER_PAX
+from constants import DEFAULT_STOP_DWELL_MIN
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +34,8 @@ class RouteStats:
     total_passengers_served: int = 0
     total_tram_km: float = 0.0
     total_passenger_km: float = 0.0
+    total_revenue: float = 0.0          # руб. (расчет: пробег * revenue_per_km)
+    total_passengers_estimated: float = 0.0  # расчетные пассажиры (пробег * pax_per_km)
     utilization_deviations: List[float] = field(default_factory=list)
 
 
@@ -65,6 +67,9 @@ class RouteConfig:
     target_utilization: float = DEFAULT_TARGET_UTIL
     random_seed: Optional[int] = None
     target_intervals: Optional[Dict[str, Dict[str, int]]] = None
+    # ── Экономические нормативы (из Excel) ────────────────────────────────
+    revenue_per_km: float = 0.0       # руб. средний доход на 1 км пути
+    passengers_per_km: float = 0.0    # чел. среднее кол-во пасс. на 1 км
 
     @property
     def stop_number(self) -> int:
@@ -236,11 +241,16 @@ class Route:
         """
         Один прогон трамвая по маршруту в одну сторону.
         После финальной остановки кладёт трамвай в done_store.
+
+        Экономика: после завершения прогона рассчитываем доход и
+        расчётных пассажиров на основе пройденного пробега и нормативов.
         """
         try:
             cfg = self.config
             tram.stats.total_trips += 1
             tram.direction = "forward" if "fwd" in cfg.route_id else "backward"
+
+            trip_km = 0.0  # километраж за данный рейс
 
             for i, stop_id in enumerate(cfg.stop_ids):
                 if i > 0:
@@ -248,8 +258,8 @@ class Route:
                     travel_time = self._calculate_travel_time(distance, self.env.now)
 
                     km = distance / 1000.0
+                    trip_km                       += km
                     self.stats.total_tram_km      += km
-                    self.stats.total_passenger_km += km * tram.passengers
 
                     yield self.env.timeout(travel_time)
 
@@ -257,10 +267,23 @@ class Route:
                     self._arrive_at_stop(tram, i + 1, stop_id, trip)
                 )
 
+            # ── Макро-экономическая оценка рейса ──────────────────────────────
+            trip_revenue        = trip_km * cfg.revenue_per_km
+            trip_passengers_est = trip_km * cfg.passengers_per_km
+
+            self.stats.total_revenue              += trip_revenue
+            self.stats.total_passengers_estimated  += trip_passengers_est
+            self.stats.total_passengers_served     += int(trip_passengers_est)
+
+            tram.stats.passengers_served += int(trip_passengers_est)
+
             log.info(
                 f"[{self.env.now:.1f}] Маршрут {cfg.route_id}: "
                 f"трамвай #{tram.tram_id} завершил прогон "
-                f"(рейс #{trip.trip_id})"
+                f"(рейс #{trip.trip_id}, "
+                f"km={trip_km:.2f}, "
+                f"rev={trip_revenue:.0f} руб., "
+                f"pax_est={trip_passengers_est:.0f})"
             )
 
             yield self.done_store.put(tram)
@@ -278,42 +301,24 @@ class Route:
         stop_id: int,
         trip: TripSchedule,
     ):
+        """
+        Обработка прибытия на остановку.
+
+        В новой модели пассажиры не генерируются на уровне остановок —
+        доходы и пассажиры рассчитываются агрегированно по итогу рейса.
+        Здесь только: фиксированное время стоянки + расчёт headway error.
+        """
         stop            = self.shared_stops[stop_id]
-        hour            = int(self.env.now // 60) % 24
         time_since_last = self.env.now - stop.last_tram_time
-        waiting_before  = stop.waiting_passengers
         planned         = trip.stop_times.get(stop_id)
 
-        alighted = tram.alight_passengers(
-            stop_index, self.config.stop_number, self.config.peak_stop_index
-        )
+        # Фиксированное время стоянки (≈1 мин) вместо расчёта по пассажирам
+        dwell_time = DEFAULT_STOP_DWELL_MIN
+        departure_time = self.env.now + dwell_time
 
-        new_pax = stop.get_new_passengers(
-            self._get_intensity(stop_id, hour), time_since_last
-        )
-        stop.waiting_passengers += new_pax
-        stop.record_waiting()
-
-        boarded = tram.board_passengers(stop.waiting_passengers)
-        stop.waiting_passengers -= boarded
-        stop.record_waiting()
-
-        if boarded > 0:
-            stop.add_waiting_time(boarded, time_since_last)
         stop.last_tram_time = self.env.now
 
-        tram.stats.passengers_served       += boarded
-        self.stats.total_passengers_served += boarded
-        if not tram.lightweight_mode:
-            tram.stats.utilization_history.append(tram.utilization)
-            self.stats.utilization_deviations.append(
-                abs(tram.utilization - self.config.target_utilization)
-            )
-
-        effective_pax_flow = max(boarded, alighted)
-        boarding_time = effective_pax_flow * BOARDING_MIN_PER_PAX
-        departure_time = self.env.now + self.config.stop_time + boarding_time
-
+        # ── Расчет headway error ──────────────────────────────────────────
         dep_hour = int(departure_time // 60) % 24
         target_headway = 0.0
         if self.config.target_intervals:
@@ -333,24 +338,23 @@ class Route:
         if stop.last_tram_departure_time is not None and target_headway > 0:
             actual_headway = departure_time - stop.last_tram_departure_time
             headway_error = abs(actual_headway - target_headway)
-            
+
         stop.last_tram_departure_time = departure_time
 
-        # Единственное место где логируем — с trip_id и planned_time
+        # ── Логирование ───────────────────────────────────────────────────
         tram.log_stop_event(
             time=self.env.now,
             stop_id=stop_id,
             direction=tram.direction,
-            waiting_before=waiting_before + new_pax,
-            alighted=alighted,
-            boarded=boarded,
-            utilization_after=tram.utilization * 100,
+            waiting_before=0,
+            alighted=0,
+            boarded=0,
+            utilization_after=0.0,
             trip_id=trip.trip_id,
             planned_time=planned,
             headway_error=headway_error,
         )
 
-        # Отклонение от расписания
         if planned is not None:
             tram.log_schedule_deviation(
                 stop_id=stop_id,
@@ -364,11 +368,11 @@ class Route:
             route_id=self.config.route_id,
             tram_id=tram.tram_id,
             direction=tram.direction,
-            waiting_before=waiting_before + new_pax,
-            alighted=alighted,
-            boarded=boarded,
-            passengers_in_tram=tram.passengers,
-            utilization_after=tram.utilization,
+            waiting_before=0,
+            alighted=0,
+            boarded=0,
+            passengers_in_tram=0,
+            utilization_after=0.0,
         ))
 
-        yield self.env.timeout(self.config.stop_time + boarding_time)
+        yield self.env.timeout(dwell_time)

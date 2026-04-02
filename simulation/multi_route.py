@@ -27,6 +27,7 @@ from models.route import Route, RouteConfig
 from models.tram import Tram
 from logger import TramLogger
 from visualization import TramVisualization
+from data_sensors.excel_parser import load_route_economics
 
 log = logging.getLogger(__name__)
 
@@ -137,12 +138,33 @@ class MultiRouteSimulation:
         else:
             self.run_dir = self._create_run_directory()
 
+        # ── Загрузка экономических нормативов из Excel ─────────────────────────
+        self.route_economics = load_route_economics()
+
         items = list(route_pairs.items())
         DEFAULT_PER_ROUTE = 30
 
         for i, (route_num, (fwd_file, bwd_file)) in enumerate(items):
             fwd_cfg = RouteConfig.from_json(fwd_file)
             bwd_cfg = RouteConfig.from_json(bwd_file)
+
+            # Инжектим экономические нормативы в конфиг маршрута
+            econ = self.route_economics.get(route_num)
+            if econ is not None:
+                fwd_cfg.revenue_per_km    = econ.mean_revenue_per_km
+                fwd_cfg.passengers_per_km = econ.mean_passengers_per_km
+                bwd_cfg.revenue_per_km    = econ.mean_revenue_per_km
+                bwd_cfg.passengers_per_km = econ.mean_passengers_per_km
+                log.info(
+                    f"Маршрут {route_num}: "
+                    f"revenue/km={econ.mean_revenue_per_km:.2f}, "
+                    f"pax/km={econ.mean_passengers_per_km:.2f}"
+                )
+            else:
+                log.warning(
+                    f"Маршрут {route_num}: нет экономических данных — "
+                    f"revenue_per_km и passengers_per_km будут = 0"
+                )
 
             self._register_stops(fwd_cfg)
             self._register_stops(bwd_cfg)
@@ -252,28 +274,44 @@ class MultiRouteSimulation:
                     route_id=pair.route_num,
                 )
                 trams = {t.tram_id: t for t in pair.all_trams}
-                viz.create_all_plots(trams=trams, output_dir=route_plots)
+
+                viz.create_all_plots(
+                    trams=trams,
+                    output_dir=route_plots,
+                )
+
+        if plot_graphs and self.run_dir:
+            from visualization import plot_global_financial_summary
+            stats = self.get_full_stats()
+            plots_dir = os.path.join(self.run_dir, "plots")
+            global_plot_file = os.path.join(plots_dir, "global_financial_summary.png")
+            plot_global_financial_summary(stats, global_plot_file)
 
     # ── Метрики ───────────────────────────────────────────────────────────────
 
-    def get_objectives(self) -> Tuple[float, float, float, int]:
+    def get_objectives(self) -> Tuple[float, float, float, float]:
         """
-        Возвращает (avg_waiting_time, total_tram_km, headway_mae, total_served).
+        Возвращает (total_tram_km, headway_mae, total_revenue, total_passengers_est).
 
-        total_tram_km  — максимизируем (транспортная работа по контракту)
-        headway_mae    — минимизируем (точность поддержания интервала)
-        total_served   — максимизируем (обслуженные пассажиры)
+        total_tram_km      — максимизируем (транспортная работа по контракту)
+        headway_mae        — минимизируем (точность поддержания интервала)
+        total_revenue      — максимизируем (чистый доход, руб.)
+        total_pax_est      — расчётные пассажиры
         """
-        total_wait = sum(
-            s.avg_waiting_time * s.passengers_served
-            for s in self.shared_stops.values()
-            if s.passengers_served > 0
-        )
-        total_served = sum(s.passengers_served for s in self.shared_stops.values())
-        avg_wait     = total_wait / total_served if total_served > 0 else 0.0
-
         total_km = sum(
             r.stats.total_tram_km
+            for p in self.pairs
+            for r in (p.fwd, p.bwd)
+        )
+
+        total_revenue = sum(
+            r.stats.total_revenue
+            for p in self.pairs
+            for r in (p.fwd, p.bwd)
+        )
+
+        total_pax_est = sum(
+            r.stats.total_passengers_estimated
             for p in self.pairs
             for r in (p.fwd, p.bwd)
         )
@@ -287,14 +325,13 @@ class MultiRouteSimulation:
         ]
         headway_mae = sum(all_errors) / len(all_errors) if all_errors else 0.0
 
-        return avg_wait, total_km, headway_mae, total_served
+        return total_km, headway_mae, total_revenue, total_pax_est
 
     def get_full_stats(self) -> dict:
-        avg_wait, total_km, headway_mae, total_served = self.get_objectives()
+        total_km, headway_mae, total_revenue, total_pax_est = self.get_objectives()
         routes_stats = {}
         for pair in self.pairs:
             for route in (pair.fwd, pair.bwd):
-                devs = route.stats.utilization_deviations
                 route_errors = [
                     abs(d["headway_error_min"])
                     for t in pair.all_trams
@@ -303,21 +340,18 @@ class MultiRouteSimulation:
                 ]
                 route_mae = sum(route_errors) / len(route_errors) if route_errors else 0.0
                 routes_stats[route.config.route_id] = {
-                    "passengers_served":         route.stats.total_passengers_served,
-                    "tram_km":                   route.stats.total_tram_km,
-                    "passenger_km":              route.stats.total_passenger_km,
-                    "avg_utilization_deviation": (
-                        sum(devs) / len(devs) if devs else 0.0
-                    ),
-                    "headway_mae_min":           route_mae,
+                    "passengers_estimated":       route.stats.total_passengers_estimated,
+                    "tram_km":                    route.stats.total_tram_km,
+                    "revenue":                    route.stats.total_revenue,
+                    "headway_mae_min":            route_mae,
                 }
         return {
             "routes": routes_stats,
             "global": {
-                "avg_waiting_time_min": avg_wait,
                 "total_tram_km":        total_km,
                 "headway_mae_min":      headway_mae,
-                "total_served":         total_served,
+                "total_revenue":        total_revenue,
+                "total_passengers_est": total_pax_est,
                 "unique_stops":         len(self.shared_stops),
             },
         }
@@ -329,15 +363,16 @@ class MultiRouteSimulation:
         stats = self.get_full_stats()
         for route_id, rs in stats["routes"].items():
             log.info(f"\nМаршрут {route_id}:")
-            log.info(f"  • Пассажиры:           {rs['passengers_served']}")
+            log.info(f"  • Пассажиры (расчёт):  {rs['passengers_estimated']:.0f}")
             log.info(f"  • Трамвай-км:          {rs['tram_km']:.1f}")
-            log.info(f"  • Пассажиро-км:        {rs['passenger_km']:.1f}")
-            log.info(f"  • Откл. загруженности: {rs['avg_utilization_deviation']:.2%}")
+            log.info(f"  • Доход:               {rs['revenue']:.0f} руб.")
+            log.info(f"  • MAE интервалов:     {rs['headway_mae_min']:.2f} мин")
         g = stats["global"]
         log.info(f"\nГлобально:")
-        log.info(f"  • Ср. время ожидания: {g['avg_waiting_time_min']:.2f} мин")
         log.info(f"  • Всего трамвай-км:   {g['total_tram_km']:.1f}")
-        log.info(f"  • Обслужено пасс.:    {g['total_served']}")
+        log.info(f"  • Всего доход:       {g['total_revenue']:.0f} руб.")
+        log.info(f"  • Пассажиры (расч.): {g['total_passengers_est']:.0f}")
         log.info(f"  • Уникальных ост.:    {g['unique_stops']}")
         log.info(f"  • MAE интервалов:     {g['headway_mae_min']:.2f} мин")
         log.info(f"{'='*60}\n")
+

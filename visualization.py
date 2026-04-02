@@ -83,28 +83,6 @@ class TramVisualization:
             )
 
     @staticmethod
-    def _hourly_means(history: List[Tuple[float, int]]) -> List[float]:
-        buckets: List[List[float]] = [[] for _ in range(24)]
-        for time, count in history:
-            buckets[int(time // 60) % 24].append(count)
-        return [float(np.mean(b)) if b else 0.0 for b in buckets]
-
-    def _build_hourly_util_data(self, trams: Dict) -> Dict[int, List[float]]:
-        result = {}
-        for tram_id, tram in trams.items():
-            stop_log = getattr(getattr(tram, "stats", None), "stop_log", None) or []
-            if not stop_log:
-                continue
-            buckets: List[List[float]] = [[] for _ in range(24)]
-            for event in stop_log:
-                hour = int(event["time"] // 60) % 24
-                buckets[hour].append(event["utilization_after"])
-            result[tram_id] = [
-                float(np.mean(b)) if b else 0.0 for b in buckets
-            ]
-        return result
-
-    @staticmethod
     def _collect_deviations(trams: Dict) -> List[dict]:
         """Собирает все schedule_deviations из всех трамваев в один плоский список."""
         result = []
@@ -112,283 +90,6 @@ class TramVisualization:
             devs = getattr(getattr(tram, "stats", None), "schedule_deviations", None) or []
             result.extend(devs)
         return result
-
-    # ── Графики остановок ─────────────────────────────────────────────────────
-
-    def plot_waiting_passengers(
-        self, output_file: str | Path = "waiting_passengers.png"
-    ) -> Path:
-        output_file = Path(output_file)
-        log.info("Создание графика динамики очередей...")
-
-        ncols = 3
-        nrows = (self.stop_number + ncols - 1) // ncols
-        fig, axes = plt.subplots(nrows, ncols, figsize=(18, nrows * 4))
-        fig.suptitle(
-            self._title("Количество ожидающих пассажиров на остановках"),
-            fontsize=16, fontweight="bold"
-        )
-
-        if self.stop_number == 1:
-            axes_flat = [axes]
-        elif nrows == 1:
-            axes_flat = list(axes)
-        else:
-            axes_flat = list(axes.flatten())
-
-        for idx, stop_id in enumerate(self.stop_ids):
-            stop = self.stops[stop_id]
-            ax = axes_flat[idx]
-            local_num = self.stop_labels[stop_id]
-
-            if not stop.waiting_history:
-                ax.text(0.5, 0.5, "Нет данных",
-                        ha="center", va="center", transform=ax.transAxes)
-                ax.set_title(f"Остановка {local_num}")
-                continue
-
-            times  = [t / 60 for t, _ in stop.waiting_history]
-            counts = [c for _, c in stop.waiting_history]
-
-            ax.plot(times, counts, linewidth=1.5, color="steelblue", alpha=0.7)
-            ax.fill_between(times, counts, alpha=0.3, color="lightblue")
-            ax.set_title(f"Остановка {local_num}", fontweight="bold")
-            ax.set_xlabel("Время (часы)", fontsize=9)
-            ax.set_ylabel("Количество пассажиров", fontsize=9)
-            ax.grid(True, alpha=0.3, linestyle="--")
-            ax.set_xlim(0, self.simulation_hours)
-
-            max_w = max(counts)
-            avg_w = sum(counts) / len(counts)
-            ax.text(
-                0.98, 0.95, f"Max: {max_w}\nAvg: {avg_w:.0f}",
-                transform=ax.transAxes, fontsize=8,
-                va="top", ha="right",
-                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
-            )
-
-        for idx in range(self.stop_number, len(axes_flat)):
-            fig.delaxes(axes_flat[idx])
-
-        plt.tight_layout()
-        plt.savefig(output_file, dpi=_DPI, bbox_inches="tight")
-        plt.close()
-        log.info(f"График сохранён: {output_file.name}")
-        return output_file
-
-    def plot_waiting_by_hour(
-        self,
-        output_file: str | Path = "waiting_by_hour.png",
-        plot_all: bool = False,
-    ) -> Path:
-        output_file = Path(output_file)
-        log.info("Создание графика ожидания по часам...")
-
-        hours = _OP_HOURS
-        stop_data = {
-            stop_id: self._hourly_means(self.stops[stop_id].waiting_history)[HOUR_START:]
-            for stop_id in self.stop_ids
-        }
-
-        selected = self.stop_ids if plot_all else self.stop_ids[::2]
-        colors = plt.cm.tab20(np.linspace(0, 1, max(len(selected), 1)))
-
-        fig, ax = plt.subplots(figsize=(14, 8))
-        for idx, stop_id in enumerate(selected):
-            local_num = self.stop_labels[stop_id]
-            ax.plot(
-                hours, stop_data[stop_id],
-                marker="o", linewidth=2, markersize=4,
-                color=colors[idx], label=f"Остановка {local_num}",
-            )
-
-        ax.set_title(
-            self._title("Среднее количество ожидающих пассажиров по часам"),
-            fontsize=14, fontweight="bold",
-        )
-        ax.set_xlabel("Час дня", fontsize=12)
-        ax.set_ylabel("Среднее количество пассажиров", fontsize=12)
-        ax.set_xticks(hours)
-        ax.grid(True, alpha=0.3, linestyle="--")
-        ax.legend(loc="best", fontsize=9, ncol=2)
-
-        self._add_peak_spans(ax)
-
-        all_values = [v for d in stop_data.values() for v in d]
-        y_label = max(all_values) * 0.92 if all_values and max(all_values) > 0 else 1.0
-        self._add_peak_labels(ax, y_label)
-
-        plt.tight_layout()
-        plt.savefig(output_file, dpi=_DPI, bbox_inches="tight")
-        plt.close()
-        log.info(f"График сохранён: {output_file.name}")
-        return output_file
-
-    def plot_heatmap(
-        self, output_file: str | Path = "waiting_heatmap.png"
-    ) -> Path:
-        output_file = Path(output_file)
-        log.info("Создание тепловой карты...")
-
-        data = np.zeros((self.stop_number, len(_OP_HOURS)))
-        for idx, stop_id in enumerate(self.stop_ids):
-            full = self._hourly_means(self.stops[stop_id].waiting_history)
-            data[idx] = full[HOUR_START:]
-
-        fig, ax = plt.subplots(figsize=(14, max(8, self.stop_number * 0.4)))
-        im = ax.imshow(data, cmap="YlOrRd", aspect="auto", interpolation="nearest")
-
-        ax.set_xticks(range(len(_OP_HOURS)))
-        ax.set_xticklabels(_OP_HOURS)
-        ax.set_yticks(range(self.stop_number))
-        ax.set_yticklabels([f"Ост. {self.stop_labels[sid]}" for sid in self.stop_ids])
-        ax.set_title(
-            self._title("Тепловая карта: количество ожидающих пассажиров"),
-            fontsize=14, fontweight="bold",
-        )
-        ax.set_xlabel("Час дня", fontsize=12)
-        ax.set_ylabel("Остановка", fontsize=12)
-
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label("Количество пассажиров", fontsize=10)
-
-        ax.set_xticks(np.arange(24) - 0.5, minor=True)
-        ax.set_yticks(np.arange(self.stop_number) - 0.5, minor=True)
-        ax.grid(which="minor", color="white", linestyle="-", linewidth=0.5)
-
-        plt.tight_layout()
-        plt.savefig(output_file, dpi=_DPI, bbox_inches="tight")
-        plt.close()
-        log.info(f"Тепловая карта сохранена: {output_file.name}")
-        return output_file
-
-    # ── Графики трамваев ──────────────────────────────────────────────────────
-
-    def plot_utilization(
-        self, trams: Dict, output_file: str | Path = "tram_utilization.png"
-    ) -> Path:
-        output_file = Path(output_file)
-        log.info("Создание графика загруженности трамваев...")
-
-        active = sorted(
-            [t for t in trams.values() if t.stats.total_trips > 0],
-            key=lambda t: t.tram_id,
-        )
-        tram_ids = [t.tram_id for t in active]
-        avg_utils = [
-            float(np.mean(t.stats.utilization_history) * 100)
-            if t.stats.utilization_history else 0.0
-            for t in active
-        ]
-
-        def _bar_color(u: float) -> str:
-            if u >= self.overload * 100:   return "red"
-            if u >= self.comfort_high * 100: return "orange"
-            if u >= self.comfort_low * 100:  return "green"
-            return "steelblue"
-
-        colors = [_bar_color(u) for u in avg_utils]
-
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-
-        ax1.bar(tram_ids, avg_utils, color=colors, alpha=0.75, edgecolor="black")
-        ax1.axhline(self.target_util * 100, color="blue", linestyle="--",
-                    linewidth=2, label=f"Целевая ({self.target_util:.0%})")
-        ax1.axhline(self.comfort_low * 100, color="green", linestyle=":",
-                    alpha=0.5, label="Комфортная зона (нижняя)")
-        ax1.axhline(self.overload * 100, color="red", linestyle=":",
-                    alpha=0.5, label="Порог перегруза")
-        ax1.set_title(self._title("Средняя загруженность трамваев"), fontweight="bold")
-        ax1.set_xlabel("ID трамвая")
-        ax1.set_ylabel("Загруженность (%)")
-        ax1.set_ylim(0, 110)
-        ax1.legend()
-        ax1.grid(True, alpha=0.3, axis="y")
-
-        trips      = [t.stats.total_trips for t in active]
-        passengers = [t.stats.passengers_served for t in active]
-
-        ax2.bar(tram_ids, trips, alpha=0.7, label="Рейсы", color="steelblue")
-        ax2_twin = ax2.twinx()
-        ax2_twin.plot(tram_ids, passengers, color="red", marker="o",
-                      linewidth=2, markersize=6, label="Пассажиры")
-        ax2.set_title(self._title("Рейсы и обслуженные пассажиры"), fontweight="bold")
-        ax2.set_xlabel("ID трамвая")
-        ax2.set_ylabel("Количество рейсов", color="steelblue")
-        ax2_twin.set_ylabel("Обслужено пассажиров", color="red")
-        ax2.legend(loc="upper left")
-        ax2_twin.legend(loc="upper right")
-        ax2.grid(True, alpha=0.3, axis="y")
-
-        plt.tight_layout()
-        plt.savefig(output_file, dpi=_DPI, bbox_inches="tight")
-        plt.close()
-        log.info(f"График загруженности сохранён: {output_file.name}")
-        return output_file
-
-    def plot_tram_utilization_by_hour(
-        self,
-        trams: Dict,
-        output_file: str | Path = "tram_utilization_by_hour.png",
-    ) -> Path:
-        output_file = Path(output_file)
-        log.info("Создание графика загруженности по часам...")
-
-        hourly_data = self._build_hourly_util_data(trams)
-        if not hourly_data:
-            log.warning("Нет данных для графика загруженности по часам — пропускаем")
-            return output_file
-
-        hours = _OP_HOURS
-        avg_util = []
-        for hour in hours:
-            vals = [hourly_data[tid][hour] for tid in hourly_data if hourly_data[tid][hour] > 0]
-            avg_util.append(float(np.mean(vals)) if vals else 0.0)
-
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
-
-        ax1.plot(hours, avg_util, linewidth=3, color="steelblue",
-                 marker="o", markersize=6, label="Средняя загруженность")
-        ax1.fill_between(hours, avg_util, alpha=0.3, color="lightblue")
-        ax1.axhline(self.target_util * 100, color="green", linestyle="--",
-                    linewidth=2, label=f"Целевая ({self.target_util:.0%})", alpha=0.7)
-        ax1.axhspan(self.comfort_low * 100, self.comfort_high * 100,
-                    alpha=0.1, color="green", label="Комфортная зона")
-        self._add_peak_spans(ax1)
-        ax1.set_title(self._title("Средняя загруженность трамваев по часам суток"),
-                      fontsize=14, fontweight="bold")
-        ax1.set_xlabel("Час дня", fontsize=12)
-        ax1.set_ylabel("Загруженность (%)", fontsize=12)
-        ax1.set_xticks(hours)
-        ax1.set_ylim(0, 100)
-        ax1.grid(True, alpha=0.3, linestyle="--")
-        ax1.legend(loc="best", fontsize=10)
-
-        y_label = max(avg_util) * 0.90 if max(avg_util) > 0 else 5.0
-        self._add_peak_labels(ax1, y_label)
-
-        selected = sorted(hourly_data.keys())[::2]
-        colors = plt.cm.tab10(np.linspace(0, 1, max(len(selected), 1)))
-        for idx, tram_id in enumerate(selected):
-            ax2.plot(hours, hourly_data[tram_id], linewidth=1.5, marker="o",
-                     markersize=3, color=colors[idx], alpha=0.7, label=f"Трамвай #{tram_id}")
-        ax2.plot(hours, avg_util, linewidth=2.5, color="black",
-                 linestyle="--", label="Средняя", alpha=0.5)
-        self._add_peak_spans(ax2)
-        ax2.set_title(self._title("Загруженность отдельных трамваев по часам"),
-                      fontsize=14, fontweight="bold")
-        ax2.set_xlabel("Час дня", fontsize=12)
-        ax2.set_ylabel("Загруженность (%)", fontsize=12)
-        ax2.set_xticks(hours)
-        ax2.set_ylim(0, 100)
-        ax2.grid(True, alpha=0.3, linestyle="--")
-        ax2.legend(loc="best", fontsize=9, ncol=2)
-
-        plt.tight_layout()
-        plt.savefig(output_file, dpi=_DPI, bbox_inches="tight")
-        plt.close()
-        log.info(f"График загруженности по часам сохранён: {output_file.name}")
-        return output_file
 
     # ── Графики отклонений от расписания ─────────────────────────────────────
 
@@ -604,16 +305,10 @@ class TramVisualization:
         log.info(f"Папка: {output_dir.resolve()}")
         log.info("=" * 60)
 
-        tasks = [
-            ("waiting_passengers.png",  lambda p: self.plot_waiting_passengers(p)),
-            ("waiting_by_hour.png",     lambda p: self.plot_waiting_by_hour(p)),
-            ("waiting_heatmap.png",     lambda p: self.plot_heatmap(p)),
-        ]
+        tasks = []
         if trams:
             tasks += [
-                ("tram_utilization.png",         lambda p: self.plot_utilization(trams, p)),
-                ("tram_utilization_by_hour.png", lambda p: self.plot_tram_utilization_by_hour(trams, p)),
-                # ── три новых графика отклонений ──────────────────────────────
+                # ── графики отклонений ────────────────────────────────────────
                 ("delay_by_stop.png",            lambda p: self.plot_delay_by_stop(trams, p)),
                 ("delay_by_hour.png",            lambda p: self.plot_delay_by_hour(trams, p)),
                 ("delay_heatmap.png",            lambda p: self.plot_delay_heatmap(trams, p)),
@@ -633,3 +328,116 @@ class TramVisualization:
         log.info(f"Создано графиков: {len(created)} / {len(tasks)}")
         log.info("=" * 60)
         return created
+
+
+def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
+    """Отрисовывает глобальный финансовый дашборд для всей сети."""
+    output_file = Path(output_file)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    log.info("Создание глобального финансового дашборда...")
+
+    routes_stats = stats.get("routes", {})
+    global_stats = stats.get("global", {})
+    route_ids = sorted(list(routes_stats.keys()))
+
+    if not route_ids:
+        log.warning("Нет данных о маршрутах для глобального дашборда.")
+        return output_file
+
+    revenues = [routes_stats[r].get("revenue", 0) for r in route_ids]
+    passengers = [routes_stats[r].get("passengers_estimated", 0) for r in route_ids]
+    tram_kms = [routes_stats[r].get("tram_km", 0) for r in route_ids]
+
+    rev_per_km = [r / km if km > 0 else 0.0 for r, km in zip(revenues, tram_kms)]
+
+    # Настройка Layout панели
+    fig = plt.figure(figsize=(16, 10))
+    # GridSpec для разделения графиков от карточек
+    gs = fig.add_gridspec(2, 3, width_ratios=[1, 1, 1.2], height_ratios=[1, 1])
+    fig.suptitle("Сводный Финансовый Дашборд Сети", fontsize=20, fontweight="bold", y=0.96)
+
+    # 1. Bar chart: Revenues
+    ax1 = fig.add_subplot(gs[0, 0])
+    bars1 = ax1.bar(route_ids, revenues, color="#2ca02c", alpha=0.8, edgecolor="black")
+    ax1.set_title("Доходы по маршрутам", fontweight="bold")
+    ax1.set_ylabel("Доход (руб.)")
+    ax1.grid(True, alpha=0.3, axis="y")
+    # Добавление значений над барами
+    for bar, val in zip(bars1, revenues):
+        ax1.text(
+            bar.get_x() + bar.get_width() / 2, 
+            val + val * 0.02, 
+            f"{val:,.0f}", 
+            ha='center', va='bottom', fontsize=9
+        )
+
+    # 2. Bar chart: Passengers
+    ax2 = fig.add_subplot(gs[0, 1])
+    bars2 = ax2.bar(route_ids, passengers, color="#1f77b4", alpha=0.8, edgecolor="black")
+    ax2.set_title("Расчетный пассажиропоток", fontweight="bold")
+    ax2.set_ylabel("Количество пассажиров")
+    ax2.grid(True, alpha=0.3, axis="y")
+    for bar, val in zip(bars2, passengers):
+        ax2.text(
+            bar.get_x() + bar.get_width() / 2, 
+            val + val * 0.02, 
+            f"{val:,.0f}", 
+            ha='center', va='bottom', fontsize=9
+        )
+
+    # 3. Bar chart: Revenue per KM
+    ax3 = fig.add_subplot(gs[1, 0:2])
+    bars3 = ax3.bar(route_ids, rev_per_km, color="#ff7f0e", alpha=0.8, edgecolor="black")
+    ax3.set_title("Рентабельность (Доход на 1 т-км)", fontweight="bold")
+    ax3.set_ylabel("Доход / т-км (руб.)")
+    ax3.grid(True, alpha=0.3, axis="y")
+    for bar, val in zip(bars3, rev_per_km):
+        ax3.text(
+            bar.get_x() + bar.get_width() / 2, 
+            val + val * 0.02, 
+            f"{val:,.1f}", 
+            ha='center', va='bottom', fontsize=9
+        )
+        
+    avg_rev_per_km = sum(revenues) / sum(tram_kms) if sum(tram_kms) > 0 else 0
+    ax3.axhline(avg_rev_per_km, color="red", linestyle="--", alpha=0.7, label=f"Среднее: {avg_rev_per_km:,.1f}")
+    ax3.legend()
+
+    # 4. KPI Panel (Правая колонка)
+    ax4 = fig.add_subplot(gs[:, 2])
+    ax4.axis("off")
+
+    tot_rev = global_stats.get("total_revenue", 0)
+    tot_pax = global_stats.get("total_passengers_est", 0)
+    tot_km  = global_stats.get("total_tram_km", 0)
+
+    x_center = 0.5
+    y_start = 0.82
+    y_step = 0.22
+
+    ax4.text(x_center, 0.96, "ГЛОБАЛЬНЫЕ KPI", fontsize=18, fontweight="bold", ha="center", va="center")
+
+    def add_kpi_card(ax, y_pos, title, value, unit, color):
+        ax.text(x_center, y_pos, title, fontsize=11, ha="center", va="bottom", color="grey", fontweight="bold")
+        formatted_val = f"{value:,.0f}" if isinstance(value, (int, float)) and int(value) == value else f"{value:,.1f}"
+        ax.text(x_center, y_pos - 0.06, formatted_val, fontsize=28, ha="center", va="center", color=color, fontweight="bold")
+        if unit:
+            ax.text(x_center, y_pos - 0.12, unit, fontsize=11, ha="center", va="top", color="grey")
+
+    add_kpi_card(ax4, y_start, "ОБЩИЙ ДОХОД СЕТИ", tot_rev, "рублей", "#2ca02c")
+    add_kpi_card(ax4, y_start - y_step, "ПАССАЖИРОПОТОК", tot_pax, "человек (расч.)", "#1f77b4")
+    add_kpi_card(ax4, y_start - y_step * 2, "ВЫПОЛНЕННАЯ РАБОТА", tot_km, "трамвай-километров", "black")
+    add_kpi_card(ax4, y_start - y_step * 3, "СРЕДНЯЯ РЕНТАБЕЛЬНОСТЬ", avg_rev_per_km, "рублей / т-км", "#ff7f0e")
+
+    # Добавление фона для панели KPI
+    bbox = matplotlib.patches.Rectangle(
+        (0.1, 0.05), 0.8, 0.95, transform=ax4.transAxes, 
+        color="#f8f9fa", zorder=-1, ec="lightgrey", lw=2, alpha=0.8
+    )
+    ax4.add_patch(bbox)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(output_file, dpi=_DPI, bbox_inches="tight")
+    plt.close()
+    log.info(f"Сводный дашборд сохранён: {output_file.name}")
+    return output_file
