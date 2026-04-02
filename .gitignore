@@ -1,0 +1,7 @@
+/.antigravityrules
+/.pytest_cache
+/.venv
+/outputs
+/tests
+/tmp
+/__pycache__
