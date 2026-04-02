@@ -16,7 +16,7 @@
 
 ---
 
-`<a name="section1"></a>`
+<a name="section1"></a>
 
 ## 1. ОБЩЕЕ ОПИСАНИЕ СИСТЕМЫ
 
@@ -37,7 +37,7 @@
 
 ---
 
-`<a name="section2"></a>`
+<a name="section2"></a>
 
 ## 2. АРХИТЕКТУРА ПРОЕКТА
 
@@ -87,7 +87,7 @@ project/
 
 ---
 
-`<a name="section3"></a>`
+<a name="section3"></a>
 
 ## 3. ЛОГИКА РАБОТЫ МОДЕЛИ И ЭКОНОМИКА
 
@@ -132,7 +132,7 @@ project/
 
 ---
 
-`<a name="section4"></a>`
+<a name="section4"></a>
 
 ## 4. МОДУЛИ И ИХ ФУНКЦИИ
 
@@ -179,7 +179,7 @@ CLI интерфейс: `python -m simulation.runner --routes 20 48 55 --trams 1
 
 ---
 
-`<a name="section5"></a>`
+<a name="section5"></a>
 
 ## 5. ФОРМАТ ВХОДНЫХ ДАННЫХ
 
@@ -199,7 +199,7 @@ CLI интерфейс: `python -m simulation.runner --routes 20 48 55 --trams 1
 
 ---
 
-`<a name="section6"></a>`
+<a name="section6"></a>
 
 ## 6. РЕЗУЛЬТАТЫ РАБОТЫ
 
@@ -228,7 +228,7 @@ CLI интерфейс: `python -m simulation.runner --routes 20 48 55 --trams 1
 
 ---
 
-`<a name="section7"></a>`
+<a name="section7"></a>
 
 ## 7. ЗАПУСК И ИСПОЛЬЗОВАНИЕ
 
@@ -248,7 +248,7 @@ python -m simulation.runner --routes 20 48 55 --trams 10 12 8
 
 ---
 
-`<a name="section8"></a>`
+<a name="section8"></a>
 
 ## 8. СТРУКТУРА ВЫХОДНОЙ ПАПКИ
 
@@ -277,7 +277,7 @@ outputs/run_2026.../
 
 ---
 
-`<a name="section9"></a>`
+<a name="section9"></a>
 
 ## 9. ОПТИМИЗАЦИЯ NSGA-II И ЭКОНОМИКА
 
