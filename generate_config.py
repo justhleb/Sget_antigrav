@@ -136,55 +136,55 @@ def generate_distances(
 # ─── Сборка и сохранение конфига ─────────────────────────────────────────────
 
 def save_config_compact(config: dict, output_file: str):
-    """Сохраняет конфигурацию в читаемом компактном JSON-формате.
-
-    Поля intensity записываются по одной остановке на строку,
-    остальные массивы — в одну строку.
-    """
+    """Сохраняет конфигурацию в читаемом компактном JSON-формате (массивы по 10 в строку)"""
     ensure_config_dir()
 
     if not output_file.startswith(CONFIG_DIR):
         output_file = os.path.join(CONFIG_DIR, os.path.basename(output_file))
 
-    stop_number = config["stop_number"]
     lines = ["{"]
-
-    # ── Скалярные поля ────────────────────────────────────────────────────────
-    lines.append(f'  "stop_number": {config["stop_number"]},')
-
-    # ── Массивы одной строкой ─────────────────────────────────────────────────
-    lines.append(f'  "distance": {json.dumps(config["distance"])},')
-
-    # ── Intensity: по одной остановке на строку ───────────────────────────────
-    lines.append('  "intensity": [')
-    for stop_id in range(1, stop_number + 1):
-        stop_data = [item for item in config["intensity"] if item[0] == stop_id]
-        items_str = ", ".join(json.dumps(item) for item in stop_data)
-        comma = "," if stop_id < stop_number else ""
-        lines.append(f"    {items_str}{comma}")
-    lines.append("  ],")
-
-    lines.append(f'  "bus_interval": {json.dumps(config["bus_interval"])},')
-    lines.append(f'  "road_loads": {json.dumps(config["road_loads"])},')
-
-    # ── Параметры симуляции ───────────────────────────────────────────────────
-    lines.append(f'  "flow_speed": {config["flow_speed"]},')
-    lines.append(f'  "peak_stop": {config["peak_stop"]},')
-    lines.append(f'  "tram_capacity": {config["tram_capacity"]},')
-    lines.append(f'  "tram_count": {config["tram_count"]},')
-    lines.append(f'  "operation_start_hour": {config["operation_start_hour"]},')
-    lines.append(f'  "operation_end_hour": {config["operation_end_hour"]},')
-    lines.append(f'  "simulation_hours": {config["simulation_hours"]},')
-    lines.append(f'  "acceleration_time": {config["acceleration_time"]},')
-    lines.append(f'  "stop_time": {config["stop_time"]},')
-    lines.append(f'  "turnaround_time": {config["turnaround_time"]},')
-    lines.append(f'  "target_utilization": {config["target_utilization"]},')
-    lines.append(f'  "random_seed": {json.dumps(config["random_seed"])}')  # может быть null
-
+    
+    # Рекомендуемый порядок ключей для читаемости
+    ordered_keys = []
+    if "route_id" in config:
+        ordered_keys.append("route_id")
+    if "stop_ids" in config:
+        ordered_keys.append("stop_ids")
+    if "stop_number" in config:
+        ordered_keys.append("stop_number")
+    if "distance" in config:
+        ordered_keys.append("distance")
+        
+    for k in config:
+        if k not in ordered_keys:
+            ordered_keys.append(k)
+            
+    for i, key in enumerate(ordered_keys):
+        val = config[key]
+        comma = "," if i < len(ordered_keys) - 1 else ""
+        
+        if isinstance(val, list) and len(val) > 0:
+            lines.append(f'  "{key}": [')
+            
+            chunks = []
+            for j in range(0, len(val), 10):
+                chunk = val[j:j+10]
+                chunk_str = ", ".join(json.dumps(item, ensure_ascii=False) for item in chunk)
+                chunks.append(chunk_str)
+                
+            for k, chunk_str in enumerate(chunks):
+                item_comma = "," if k < len(chunks) - 1 else ""
+                lines.append(f"    {chunk_str}{item_comma}")
+                
+            lines.append(f"  ]{comma}")
+        else:
+            val_str = json.dumps(val, ensure_ascii=False)
+            lines.append(f'  "{key}": {val_str}{comma}')
+            
     lines.append("}")
 
     with open(output_file, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+        f.write("\n".join(lines) + "\n")
 
     print(f"Конфигурация сохранена: {output_file}")
 
@@ -216,7 +216,6 @@ def create_config(
     config = {
         "stop_number":          stop_number,
         "distance":             generate_distances(stop_number, seed=random_seed),
-        "intensity":            generate_intensity_data(stop_number),
         "bus_interval":         generate_bus_intervals(),
         "road_loads":           generate_road_loads(),
         "flow_speed":           flow_speed,
@@ -283,5 +282,5 @@ if __name__ == "__main__":
     print()
 
     print("=" * 60)
-    print(f"✓ Все конфигурации сохранены в папку: {CONFIG_DIR}/")
+    print(f"Все конфигурации сохранены в папку: {CONFIG_DIR}/")
     print("=" * 60)

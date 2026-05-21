@@ -14,7 +14,23 @@ from pathlib import Path
 
 from simulation.multi_route import MultiRouteSimulation
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+class SimulationConsoleFilter(logging.Filter):
+    def filter(self, record):
+        return record.name == "simulation.results" or record.levelno >= logging.WARNING
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Clear existing handlers to prevent duplicates
+for h in root_logger.handlers[:]:
+    root_logger.removeHandler(h)
+
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter("%(message)s"))
+console_handler.addFilter(SimulationConsoleFilter())
+root_logger.addHandler(console_handler)
+
 log = logging.getLogger(__name__)
 
 DEFAULT_CONFIGS_DIR  = Path("configs")

@@ -10,7 +10,7 @@ import logging
 import random
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import simpy
 
@@ -36,15 +36,10 @@ class RouteStats:
     total_passenger_km: float = 0.0
     total_revenue: float = 0.0          # руб. (расчет: пробег * revenue_per_km)
     total_passengers_estimated: float = 0.0  # расчетные пассажиры (пробег * pax_per_km)
+    total_trips: int = 0                # количество завершённых рейсов
     utilization_deviations: List[float] = field(default_factory=list)
 
 
-@dataclass
-class TripSchedule:
-    """Эталонное расписание одного рейса."""
-    trip_id: int
-    departure_from_depot: float        # минуты от полуночи
-    stop_times: Dict[int, float]       # {stop_id: planned_arrival_min}
 
 
 @dataclass
@@ -56,8 +51,6 @@ class RouteConfig:
     peak_stop_index: int
     simulation_hours: int
     distances: Dict[int, float]
-    intensity_map: Dict[int, Dict[int, float]]
-    schedule: List[TripSchedule]
     road_loads: Dict[int, float]
     depot_to_first_stop: float = 8.0
     min_rest_time: float = 15.0
@@ -70,6 +63,12 @@ class RouteConfig:
     # ── Экономические нормативы (из Excel) ────────────────────────────────
     revenue_per_km: float = 0.0       # руб. средний доход на 1 км пути
     passengers_per_km: float = 0.0    # чел. среднее кол-во пасс. на 1 км
+    # ── Расходные параметры (из JSON-конфигов) ────────────────────────────
+    energy_per_km: float = 0.0              # энергия на км, руб.
+    maintenance_per_km: float = 0.0         # ТОиР на км (пробежный), руб.
+    depreciation_per_km: float = 0.0        # амортизация на км, руб.
+    payroll_per_trip: float = 0.0            # ФОТ на рейс, руб.
+    maintenance_fixed_per_trip: float = 0.0  # ТОиР на рейс (фикс.), руб.
 
     @property
     def stop_number(self) -> int:
@@ -82,10 +81,6 @@ class RouteConfig:
 
         distances = {item[0]: item[1] for item in c["distance"]}
 
-        intensity_map: Dict[int, Dict[int, float]] = defaultdict(dict)
-        for stop_id, hour, intensity in c["intensity"]:
-            intensity_map[stop_id][hour] = intensity
-
         road_loads = {hour: load for hour, load in c["road_loads"]}
 
         stop_ids = c.get("stop_ids", list(range(1, c["stop_number"] + 1)))
@@ -95,15 +90,6 @@ class RouteConfig:
             stop_ids.index(raw_peak) + 1 if raw_peak in stop_ids
             else len(stop_ids) // 2
         )
-
-        schedule: List[TripSchedule] = []
-        for trip in c.get("schedule", []):
-            stop_times = {stop_id: arr_min for stop_id, arr_min in trip["stops"]}
-            schedule.append(TripSchedule(
-                trip_id=trip["trip_id"],
-                departure_from_depot=trip["departure_from_depot"],
-                stop_times=stop_times,
-            ))
 
         config_route_id = str(c.get("route_id", config_file))
         
@@ -126,8 +112,6 @@ class RouteConfig:
             peak_stop_index=peak_stop_index,
             simulation_hours=c["simulation_hours"],
             distances=distances,
-            intensity_map=dict(intensity_map),
-            schedule=schedule,
             road_loads=road_loads,
             depot_to_first_stop=c.get("depot_to_first_stop", 8.0),
             min_rest_time=c.get("min_rest_time", 15.0),
@@ -137,6 +121,11 @@ class RouteConfig:
             target_utilization=c.get("target_utilization", DEFAULT_TARGET_UTIL),
             random_seed=c.get("random_seed", None),
             target_intervals=target_intervals,
+            energy_per_km=c.get("energy_per_km", 0.0),
+            maintenance_per_km=c.get("maintenance_per_km", 0.0),
+            depreciation_per_km=c.get("depreciation_per_km", 0.0),
+            payroll_per_trip=c.get("payroll_per_trip", 0.0),
+            maintenance_fixed_per_trip=c.get("maintenance_fixed_per_trip", 0.0),
         )
 
 
@@ -165,12 +154,9 @@ class Route:
         self.stats           = RouteStats(route_id=config.route_id)
 
     def start(self):
-        self.env.process(self._schedule_dispatcher())
+        self.env.process(self._continuous_dispatcher())
 
     # ── Вспомогательные ───────────────────────────────────────────────────────
-
-    def _get_intensity(self, stop_id: int, hour: int) -> float:
-        return self.config.intensity_map.get(stop_id, {}).get(hour, 0.0)
 
     def _get_road_load(self, t_min: float) -> float:
         hour = (t_min // 60) % 24
@@ -207,37 +193,23 @@ class Route:
 
     # ── SimPy-процессы ────────────────────────────────────────────────────────
 
-    def _schedule_dispatcher(self):
+    def _continuous_dispatcher(self):
         """
-        Читает schedule и выпускает трамваи строго по расписанию.
-        Если трамвая нет в момент отправления — рейс пропускается.
+        Непрерывно выпускает трамваи по мере их появления в available_trams.
+        Трамваи циклически проходят маршрут: fwd → разворот → bwd → отдых → fwd.
         """
-        for trip in self.config.schedule:
-            # Ждём планового времени выезда из депо
-            wait = trip.departure_from_depot - self.env.now
-            if wait > 0:
-                yield self.env.timeout(wait)
+        trip_id = 0
+        sim_end = self.config.simulation_hours * 60
+        while self.env.now < sim_end:
+            tram = yield self.available_trams.get()
+            trip_id += 1
+            log.info(
+                f"[{self.env.now:.1f}] Маршрут {self.config.route_id}: "
+                f"трамвай #{tram.tram_id} выехал (рейс #{trip_id})"
+            )
+            self.env.process(self._tram_run(tram, trip_id))
 
-            # Трамвай есть — берём, нет — пропускаем рейс
-            if len(self.available_trams.items) > 0:
-                tram = yield self.available_trams.get()
-                departure_delay = self.env.now - trip.departure_from_depot
-                log.info(
-                    f"[{self.env.now:.1f}] Маршрут {self.config.route_id}: "
-                    f"трамвай #{tram.tram_id} выехал "
-                    f"(рейс #{trip.trip_id}, "
-                    f"план={trip.departure_from_depot:.1f}, "
-                    f"задержка={departure_delay:+.1f} мин)"
-                )
-                self.env.process(self._tram_run(tram, trip))
-            else:
-                log.warning(
-                    f"[{self.env.now:.1f}] Маршрут {self.config.route_id}: "
-                    f"рейс #{trip.trip_id} ПРОПУЩЕН — нет свободных трамваев "
-                    f"(план={trip.departure_from_depot:.1f})"
-                )
-
-    def _tram_run(self, tram: Tram, trip: TripSchedule):
+    def _tram_run(self, tram: Tram, trip_id: int):
         """
         Один прогон трамвая по маршруту в одну сторону.
         После финальной остановки кладёт трамвай в done_store.
@@ -248,13 +220,15 @@ class Route:
         try:
             cfg = self.config
             tram.stats.total_trips += 1
+            self.stats.total_trips += 1
             tram.direction = "forward" if "fwd" in cfg.route_id else "backward"
 
             trip_km = 0.0  # километраж за данный рейс
 
             for i, stop_id in enumerate(cfg.stop_ids):
                 if i > 0:
-                    distance    = cfg.distances.get(stop_id, 0.0)
+                    prev_stop_id = cfg.stop_ids[i - 1]
+                    distance    = cfg.distances.get(prev_stop_id, 0.0)
                     travel_time = self._calculate_travel_time(distance, self.env.now)
 
                     km = distance / 1000.0
@@ -264,7 +238,7 @@ class Route:
                     yield self.env.timeout(travel_time)
 
                 yield self.env.process(
-                    self._arrive_at_stop(tram, i + 1, stop_id, trip)
+                    self._arrive_at_stop(tram, i + 1, stop_id, trip_id)
                 )
 
             # ── Макро-экономическая оценка рейса ──────────────────────────────
@@ -280,7 +254,7 @@ class Route:
             log.info(
                 f"[{self.env.now:.1f}] Маршрут {cfg.route_id}: "
                 f"трамвай #{tram.tram_id} завершил прогон "
-                f"(рейс #{trip.trip_id}, "
+                f"(рейс #{trip_id}, "
                 f"km={trip_km:.2f}, "
                 f"rev={trip_revenue:.0f} руб., "
                 f"pax_est={trip_passengers_est:.0f})"
@@ -299,20 +273,16 @@ class Route:
         tram: Tram,
         stop_index: int,
         stop_id: int,
-        trip: TripSchedule,
+        trip_id: int,
     ):
         """
         Обработка прибытия на остановку.
 
-        В новой модели пассажиры не генерируются на уровне остановок —
-        доходы и пассажиры рассчитываются агрегированно по итогу рейса.
-        Здесь только: фиксированное время стоянки + расчёт headway error.
+        Фиксированное время стоянки + расчёт headway error.
         """
-        stop            = self.shared_stops[stop_id]
-        time_since_last = self.env.now - stop.last_tram_time
-        planned         = trip.stop_times.get(stop_id)
+        stop = self.shared_stops[stop_id]
 
-        # Фиксированное время стоянки (≈1 мин) вместо расчёта по пассажирам
+        # Фиксированное время стоянки (≈1 мин)
         dwell_time = DEFAULT_STOP_DWELL_MIN
         departure_time = self.env.now + dwell_time
 
@@ -350,18 +320,17 @@ class Route:
             alighted=0,
             boarded=0,
             utilization_after=0.0,
-            trip_id=trip.trip_id,
-            planned_time=planned,
+            trip_id=trip_id,
+            planned_time=None,
             headway_error=headway_error,
         )
 
-        if planned is not None:
-            tram.log_schedule_deviation(
-                stop_id=stop_id,
-                planned_time=planned,
-                actual_time=self.env.now,
-                headway_error=headway_error,
-            )
+        tram.log_schedule_deviation(
+            stop_id=stop_id,
+            planned_time=self.env.now,
+            actual_time=self.env.now,
+            headway_error=headway_error,
+        )
 
         stop.log_event(StopEvent(
             time=self.env.now,

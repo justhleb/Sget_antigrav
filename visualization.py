@@ -331,113 +331,211 @@ class TramVisualization:
 
 
 def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
-    """Отрисовывает глобальный финансовый дашборд для всей сети."""
+    """Отрисовывает сводный финансовый дашборд (Выручка, OpEx, Маржа, ROS)."""
+    import matplotlib.font_manager as fm
+
     output_file = Path(output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    log.info("Создание глобального финансового дашборда...")
+    log.info("Создание финансового дашборда...")
 
     routes_stats = stats.get("routes", {})
     global_stats = stats.get("global", {})
-    route_ids = sorted(list(routes_stats.keys()))
 
-    if not route_ids:
-        log.warning("Нет данных о маршрутах для глобального дашборда.")
+    # Группируем fwd+bwd в один маршрут (по номеру)
+    route_nums: Dict[str, dict] = {}
+    for rid, rs in routes_stats.items():
+        num = rid.split("_")[0]
+        if num not in route_nums:
+            route_nums[num] = {
+                "revenue": 0, "opex": 0, "marginal_profit": 0,
+                "tram_km": 0, "total_trips": 0,
+            }
+        route_nums[num]["revenue"] += rs.get("revenue", 0)
+        route_nums[num]["opex"] += rs.get("opex", 0)
+        route_nums[num]["marginal_profit"] += rs.get("marginal_profit", 0)
+        route_nums[num]["tram_km"] += rs.get("tram_km", 0)
+        route_nums[num]["total_trips"] += rs.get("total_trips", 0)
+
+    for num, d in route_nums.items():
+        d["profit_per_km"] = d["marginal_profit"] / d["tram_km"] if d["tram_km"] > 0 else 0
+        d["ros_pct"] = (d["marginal_profit"] / d["revenue"] * 100) if d["revenue"] > 0 else 0
+
+    labels = sorted(route_nums.keys())
+    if not labels:
+        log.warning("Нет данных о маршрутах для дашборда.")
         return output_file
 
-    revenues = [routes_stats[r].get("revenue", 0) for r in route_ids]
-    passengers = [routes_stats[r].get("passengers_estimated", 0) for r in route_ids]
-    tram_kms = [routes_stats[r].get("tram_km", 0) for r in route_ids]
+    # ── Шрифт Inter ──────────────────────────────────────────────────────────
+    inter_props = {}
+    for fp in fm.findSystemFonts():
+        try:
+            name = fm.FontProperties(fname=fp).get_name()
+            if "inter" in name.lower():
+                inter_props = {"fontproperties": fm.FontProperties(fname=fp)}
+                break
+        except Exception:
+            continue
 
-    rev_per_km = [r / km if km > 0 else 0.0 for r, km in zip(revenues, tram_kms)]
+    # ── Цветовая палитра ─────────────────────────────────────────────────────
+    C_BG       = "#FFFFFF"
+    C_TEXT     = "#2D2D2D"
+    C_MUTED    = "#8C8C8C"
+    C_GRID     = "#E8E8E8"
+    C_REVENUE  = "#34A853"
+    C_OPEX     = "#EA4335"
+    C_MARGIN   = "#4285F4"
+    C_ROS      = "#FBBC05"
+    C_PROFKM   = "#7B61FF"
+    C_BAR_REV  = "#34A853"
+    C_BAR_OPEX = "#EA4335"
 
-    # Настройка Layout панели
-    fig = plt.figure(figsize=(16, 10))
-    # GridSpec для разделения графиков от карточек
-    gs = fig.add_gridspec(2, 3, width_ratios=[1, 1, 1.2], height_ratios=[1, 1])
-    fig.suptitle("Сводный Финансовый Дашборд Сети", fontsize=20, fontweight="bold", y=0.96)
-
-    # 1. Bar chart: Revenues
-    ax1 = fig.add_subplot(gs[0, 0])
-    bars1 = ax1.bar(route_ids, revenues, color="#2ca02c", alpha=0.8, edgecolor="black")
-    ax1.set_title("Доходы по маршрутам", fontweight="bold")
-    ax1.set_ylabel("Доход (руб.)")
-    ax1.grid(True, alpha=0.3, axis="y")
-    # Добавление значений над барами
-    for bar, val in zip(bars1, revenues):
-        ax1.text(
-            bar.get_x() + bar.get_width() / 2, 
-            val + val * 0.02, 
-            f"{val:,.0f}", 
-            ha='center', va='bottom', fontsize=9
-        )
-
-    # 2. Bar chart: Passengers
-    ax2 = fig.add_subplot(gs[0, 1])
-    bars2 = ax2.bar(route_ids, passengers, color="#1f77b4", alpha=0.8, edgecolor="black")
-    ax2.set_title("Расчетный пассажиропоток", fontweight="bold")
-    ax2.set_ylabel("Количество пассажиров")
-    ax2.grid(True, alpha=0.3, axis="y")
-    for bar, val in zip(bars2, passengers):
-        ax2.text(
-            bar.get_x() + bar.get_width() / 2, 
-            val + val * 0.02, 
-            f"{val:,.0f}", 
-            ha='center', va='bottom', fontsize=9
-        )
-
-    # 3. Bar chart: Revenue per KM
-    ax3 = fig.add_subplot(gs[1, 0:2])
-    bars3 = ax3.bar(route_ids, rev_per_km, color="#ff7f0e", alpha=0.8, edgecolor="black")
-    ax3.set_title("Рентабельность (Доход на 1 т-км)", fontweight="bold")
-    ax3.set_ylabel("Доход / т-км (руб.)")
-    ax3.grid(True, alpha=0.3, axis="y")
-    for bar, val in zip(bars3, rev_per_km):
-        ax3.text(
-            bar.get_x() + bar.get_width() / 2, 
-            val + val * 0.02, 
-            f"{val:,.1f}", 
-            ha='center', va='bottom', fontsize=9
-        )
-        
-    avg_rev_per_km = sum(revenues) / sum(tram_kms) if sum(tram_kms) > 0 else 0
-    ax3.axhline(avg_rev_per_km, color="red", linestyle="--", alpha=0.7, label=f"Среднее: {avg_rev_per_km:,.1f}")
-    ax3.legend()
-
-    # 4. KPI Panel (Правая колонка)
-    ax4 = fig.add_subplot(gs[:, 2])
-    ax4.axis("off")
-
-    tot_rev = global_stats.get("total_revenue", 0)
-    tot_pax = global_stats.get("total_passengers_est", 0)
-    tot_km  = global_stats.get("total_tram_km", 0)
-
-    x_center = 0.5
-    y_start = 0.82
-    y_step = 0.22
-
-    ax4.text(x_center, 0.96, "ГЛОБАЛЬНЫЕ KPI", fontsize=18, fontweight="bold", ha="center", va="center")
-
-    def add_kpi_card(ax, y_pos, title, value, unit, color):
-        ax.text(x_center, y_pos, title, fontsize=11, ha="center", va="bottom", color="grey", fontweight="bold")
-        formatted_val = f"{value:,.0f}" if isinstance(value, (int, float)) and int(value) == value else f"{value:,.1f}"
-        ax.text(x_center, y_pos - 0.06, formatted_val, fontsize=28, ha="center", va="center", color=color, fontweight="bold")
-        if unit:
-            ax.text(x_center, y_pos - 0.12, unit, fontsize=11, ha="center", va="top", color="grey")
-
-    add_kpi_card(ax4, y_start, "ОБЩИЙ ДОХОД СЕТИ", tot_rev, "рублей", "#2ca02c")
-    add_kpi_card(ax4, y_start - y_step, "ПАССАЖИРОПОТОК", tot_pax, "человек (расч.)", "#1f77b4")
-    add_kpi_card(ax4, y_start - y_step * 2, "ВЫПОЛНЕННАЯ РАБОТА", tot_km, "трамвай-километров", "black")
-    add_kpi_card(ax4, y_start - y_step * 3, "СРЕДНЯЯ РЕНТАБЕЛЬНОСТЬ", avg_rev_per_km, "рублей / т-км", "#ff7f0e")
-
-    # Добавление фона для панели KPI
-    bbox = matplotlib.patches.Rectangle(
-        (0.1, 0.05), 0.8, 0.95, transform=ax4.transAxes, 
-        color="#f8f9fa", zorder=-1, ec="lightgrey", lw=2, alpha=0.8
+    # ── Layout: 3 строки × 2 колонки ─────────────────────────────────────────
+    fig = plt.figure(figsize=(16, 14), facecolor=C_BG)
+    gs = fig.add_gridspec(
+        3, 2,
+        height_ratios=[0.22, 1, 1],
+        hspace=0.35, wspace=0.30,
+        left=0.07, right=0.95, top=0.94, bottom=0.05,
     )
-    ax4.add_patch(bbox)
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(output_file, dpi=_DPI, bbox_inches="tight")
+    # ── ROW 0: KPI-карточки ──────────────────────────────────────────────────
+    ax_kpi = fig.add_subplot(gs[0, :])
+    ax_kpi.set_xlim(0, 1)
+    ax_kpi.set_ylim(0, 1)
+    ax_kpi.axis("off")
+
+    g = global_stats
+    kpis = [
+        ("Выручка",            g.get("total_revenue", 0),       "₽", C_REVENUE),
+        ("OpEx",               g.get("opex", 0),                "₽", C_OPEX),
+        ("Марж. прибыль",      g.get("marginal_profit", 0),     "₽", C_MARGIN),
+        ("Прибыль / км",       g.get("profit_per_km", 0),       "₽/км", C_PROFKM),
+        ("ROS",                g.get("ros_pct", 0),             "%", C_ROS),
+    ]
+
+    card_w = 1.0 / len(kpis)
+    for i, (title, value, unit, color) in enumerate(kpis):
+        cx = card_w * i + card_w / 2
+        # Заголовок
+        ax_kpi.text(cx, 0.82, title.upper(), fontsize=10, ha="center", va="center",
+                    color=C_MUTED, fontweight="normal", **inter_props)
+        # Значение
+        if unit == "%":
+            val_str = f"{value:+.1f}{unit}"
+        elif abs(value) >= 1_000_000:
+            val_str = f"{value/1_000_000:,.2f} М{unit}"
+        elif abs(value) >= 1_000:
+            val_str = f"{value:,.0f} {unit}"
+        else:
+            val_str = f"{value:,.2f} {unit}"
+        ax_kpi.text(cx, 0.38, val_str, fontsize=22, ha="center", va="center",
+                    color=color, fontweight="bold", **inter_props)
+        # Разделитель
+        if i < len(kpis) - 1:
+            ax_kpi.axvline(card_w * (i + 1), color=C_GRID, linewidth=1, ymin=0.15, ymax=0.85)
+
+    # Рамка
+    for spine in ["top", "bottom", "left", "right"]:
+        ax_kpi.spines[spine].set_visible(False)
+    rect = matplotlib.patches.FancyBboxPatch(
+        (0.005, 0.05), 0.99, 0.90, boxstyle="round,pad=0.02",
+        facecolor="#F9F9F9", edgecolor=C_GRID, linewidth=1.5,
+        transform=ax_kpi.transAxes, zorder=-1,
+    )
+    ax_kpi.add_patch(rect)
+
+    # ── ROW 1: Выручка vs OpEx (grouped bar) ────────────────────────────────
+    ax1 = fig.add_subplot(gs[1, 0], facecolor=C_BG)
+    x = np.arange(len(labels))
+    w = 0.35
+    revs = [route_nums[l]["revenue"] for l in labels]
+    opexs = [route_nums[l]["opex"] for l in labels]
+
+    ax1.bar(x - w/2, revs,  w, color=C_BAR_REV,  alpha=0.85, label="Выручка", edgecolor="none")
+    ax1.bar(x + w/2, opexs, w, color=C_BAR_OPEX, alpha=0.85, label="OpEx",    edgecolor="none")
+
+    for xi, (rv, ox) in enumerate(zip(revs, opexs)):
+        ax1.text(xi - w/2, rv + rv * 0.01, f"{rv:,.0f}", ha="center", va="bottom",
+                 fontsize=8, color=C_TEXT, **inter_props)
+        ax1.text(xi + w/2, ox + ox * 0.01, f"{ox:,.0f}", ha="center", va="bottom",
+                 fontsize=8, color=C_TEXT, **inter_props)
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([f"Маршрут {l}" for l in labels], **inter_props)
+    ax1.set_ylabel("руб.", color=C_MUTED, **inter_props)
+    ax1.set_title("Выручка vs OpEx", fontsize=13, color=C_TEXT, pad=12, **inter_props)
+    ax1.legend(frameon=False, fontsize=9)
+    ax1.grid(axis="y", color=C_GRID, linewidth=0.7)
+    ax1.set_axisbelow(True)
+    for spine in ax1.spines.values():
+        spine.set_visible(False)
+    ax1.tick_params(colors=C_MUTED, length=0)
+
+    # ── ROW 1: Маржинальная прибыль (горизонтальный bar) ─────────────────────
+    ax2 = fig.add_subplot(gs[1, 1], facecolor=C_BG)
+    margins = [route_nums[l]["marginal_profit"] for l in labels]
+    bar_colors = [C_MARGIN if m >= 0 else C_OPEX for m in margins]
+    bars2 = ax2.barh([f"Маршрут {l}" for l in labels], margins, color=bar_colors, alpha=0.85, edgecolor="none", height=0.5)
+    for bar, val in zip(bars2, margins):
+        offset = val * 0.02 if val >= 0 else val * 0.02
+        ax2.text(val + offset, bar.get_y() + bar.get_height() / 2,
+                 f"{val:,.0f} ₽", ha="left" if val >= 0 else "right",
+                 va="center", fontsize=9, color=C_TEXT, **inter_props)
+    ax2.axvline(0, color=C_MUTED, linewidth=0.8)
+    ax2.set_title("Маржинальная прибыль", fontsize=13, color=C_TEXT, pad=12, **inter_props)
+    ax2.grid(axis="x", color=C_GRID, linewidth=0.7)
+    ax2.set_axisbelow(True)
+    for spine in ax2.spines.values():
+        spine.set_visible(False)
+    ax2.tick_params(colors=C_MUTED, length=0)
+
+    # ── ROW 2: Удельная прибыль на км ────────────────────────────────────────
+    ax3 = fig.add_subplot(gs[2, 0], facecolor=C_BG)
+    ppkm = [route_nums[l]["profit_per_km"] for l in labels]
+    colors3 = [C_PROFKM if v >= 0 else C_OPEX for v in ppkm]
+    bars3 = ax3.bar(x, ppkm, 0.5, color=colors3, alpha=0.85, edgecolor="none")
+    for xi, val in enumerate(ppkm):
+        ax3.text(xi, val + abs(val) * 0.02, f"{val:,.2f}", ha="center", va="bottom",
+                 fontsize=9, color=C_TEXT, **inter_props)
+    avg_ppkm = g.get("profit_per_km", 0)
+    ax3.axhline(avg_ppkm, color=C_MUTED, linestyle="--", linewidth=1, alpha=0.7)
+    ax3.text(len(labels) - 0.5, avg_ppkm, f"  ср. {avg_ppkm:,.2f}", fontsize=8,
+             va="bottom", color=C_MUTED, **inter_props)
+    ax3.set_xticks(x)
+    ax3.set_xticklabels([f"Маршрут {l}" for l in labels], **inter_props)
+    ax3.set_ylabel("₽/км", color=C_MUTED, **inter_props)
+    ax3.set_title("Удельная маржинальная прибыль на км", fontsize=13, color=C_TEXT, pad=12, **inter_props)
+    ax3.axhline(0, color=C_MUTED, linewidth=0.8)
+    ax3.grid(axis="y", color=C_GRID, linewidth=0.7)
+    ax3.set_axisbelow(True)
+    for spine in ax3.spines.values():
+        spine.set_visible(False)
+    ax3.tick_params(colors=C_MUTED, length=0)
+
+    # ── ROW 2: ROS (рентабельность) ──────────────────────────────────────────
+    ax4 = fig.add_subplot(gs[2, 1], facecolor=C_BG)
+    ross = [route_nums[l]["ros_pct"] for l in labels]
+    colors4 = [C_ROS if v >= 0 else C_OPEX for v in ross]
+    bars4 = ax4.bar(x, ross, 0.5, color=colors4, alpha=0.85, edgecolor="none")
+    for xi, val in enumerate(ross):
+        ax4.text(xi, val + abs(val) * 0.02, f"{val:.1f}%", ha="center", va="bottom",
+                 fontsize=9, color=C_TEXT, **inter_props)
+    avg_ros = g.get("ros_pct", 0)
+    ax4.axhline(avg_ros, color=C_MUTED, linestyle="--", linewidth=1, alpha=0.7)
+    ax4.text(len(labels) - 0.5, avg_ros, f"  ср. {avg_ros:.1f}%", fontsize=8,
+             va="bottom", color=C_MUTED, **inter_props)
+    ax4.set_xticks(x)
+    ax4.set_xticklabels([f"Маршрут {l}" for l in labels], **inter_props)
+    ax4.set_ylabel("%", color=C_MUTED, **inter_props)
+    ax4.set_title("ROS (Рентабельность продаж)", fontsize=13, color=C_TEXT, pad=12, **inter_props)
+    ax4.axhline(0, color=C_MUTED, linewidth=0.8)
+    ax4.grid(axis="y", color=C_GRID, linewidth=0.7)
+    ax4.set_axisbelow(True)
+    for spine in ax4.spines.values():
+        spine.set_visible(False)
+    ax4.tick_params(colors=C_MUTED, length=0)
+
+    plt.savefig(output_file, dpi=_DPI, bbox_inches="tight", facecolor=C_BG)
     plt.close()
-    log.info(f"Сводный дашборд сохранён: {output_file.name}")
+    log.info(f"Финансовый дашборд сохранён: {output_file.name}")
     return output_file

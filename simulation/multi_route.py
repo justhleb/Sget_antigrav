@@ -30,9 +30,11 @@ from visualization import TramVisualization
 from data_sensors.excel_parser import load_route_economics
 
 log = logging.getLogger(__name__)
+results_log = logging.getLogger("simulation.results")
 
 OUTPUT_DIR    = "outputs"
 MIN_REST_TIME = 15.0
+DEFAULT_ROAD_LOAD_ESTIMATE = 0.4  # для оценки интервала начального выпуска
 
 
 class TramPair:
@@ -76,7 +78,6 @@ class TramPair:
             tram_id = id_offset + i + 1
             tram = Tram(tram_id, self.route_num, capacity, lightweight_mode=lightweight_mode)
             self.all_trams.append(tram)
-            self.pool.put(tram)
         log.info(
             f"[TramPair {self.route_num}] Парк: {count} трамваев "
             f"(id {id_offset + 1}..{id_offset + count})"
@@ -87,6 +88,37 @@ class TramPair:
         self.bwd.start()
         self.env.process(self._turnaround_process())
         self.env.process(self._rest_process())
+        self.env.process(self._staggered_release())
+
+    def _calc_dispatch_interval(self) -> float:
+        """Оценка интервала между выпусками = время_кругорейса / N."""
+        fwd_km = sum(self.fwd.config.distances.values()) / 1000
+        bwd_km = sum(self.bwd.config.distances.values()) / 1000
+        eff_speed = max(
+            self.fwd.config.flow_speed * (1 - DEFAULT_ROAD_LOAD_ESTIMATE),
+            5.0,
+        )
+        travel_min = (fwd_km + bwd_km) / eff_speed * 60
+        n_stops = len(self.fwd.config.stop_ids) + len(self.bwd.config.stop_ids)
+        dwell_min = n_stops * 1.0  # ~1 мин на остановку
+        turnaround = self.fwd.config.turnaround_time
+        rest = max(self.fwd.config.min_rest_time, MIN_REST_TIME)
+        round_trip = travel_min + dwell_min + turnaround + rest
+        n = max(len(self.all_trams), 1)
+        interval = round_trip / n
+        log.info(
+            f"[TramPair {self.route_num}] Оценка кругорейса: {round_trip:.0f} мин, "
+            f"интервал выпуска: {interval:.1f} мин"
+        )
+        return interval
+
+    def _staggered_release(self):
+        """Выпускает трамваи из депо с равным интервалом."""
+        interval = self._calc_dispatch_interval()
+        for i, tram in enumerate(self.all_trams):
+            yield self.pool.put(tram)
+            if i < len(self.all_trams) - 1:
+                yield self.env.timeout(interval)
 
     def _turnaround_process(self):
         """fwd завершён → разворот → трамвай доступен для bwd."""
@@ -191,6 +223,15 @@ class MultiRouteSimulation:
             f"{len(self.shared_stops)} уникальных остановок"
         )
 
+        # ── Добавление файлового лога для всех (включая служебные) сообщений прогона ──────
+        if self.run_dir:
+            logs_dir = os.path.join(self.run_dir, "logs")
+            log_file_path = os.path.join(logs_dir, "simulation.log")
+            self._file_handler = logging.FileHandler(log_file_path, encoding="utf-8")
+            self._file_handler.setLevel(logging.INFO)
+            self._file_handler.setFormatter(logging.Formatter("%(message)s"))
+            logging.getLogger().addHandler(self._file_handler)
+
     # ── Фабричный метод для NSGA-II ───────────────────────────────────────────
 
     @classmethod
@@ -252,7 +293,6 @@ class MultiRouteSimulation:
                 tl = TramLogger(output_dir=route_logs)
                 trams = {t.tram_id: t for t in pair.all_trams}
                 tl.save_all_trams(trams, route_id=pair.route_num)
-                tl.create_summary(trams, route_id=pair.route_num)
                 tl.save_schedule_deviations(trams, route_id=pair.route_num)
 
         if plot_graphs and self.run_dir:
@@ -286,6 +326,11 @@ class MultiRouteSimulation:
             plots_dir = os.path.join(self.run_dir, "plots")
             global_plot_file = os.path.join(plots_dir, "global_financial_summary.png")
             plot_global_financial_summary(stats, global_plot_file)
+
+        # Закрываем и удаляем FileHandler, чтобы логи не дублировались/не утекали в будущем
+        if hasattr(self, "_file_handler"):
+            logging.getLogger().removeHandler(self._file_handler)
+            self._file_handler.close()
 
     # ── Метрики ───────────────────────────────────────────────────────────────
 
@@ -332,47 +377,88 @@ class MultiRouteSimulation:
         routes_stats = {}
         for pair in self.pairs:
             for route in (pair.fwd, pair.bwd):
+                cfg = route.config
                 route_errors = [
                     abs(d["headway_error_min"])
                     for t in pair.all_trams
                     for d in t.stats.schedule_deviations
-                    if d["route_id"] == route.config.route_id and d.get("headway_error_min") is not None
+                    if d["route_id"] == cfg.route_id and d.get("headway_error_min") is not None
                 ]
                 route_mae = sum(route_errors) / len(route_errors) if route_errors else 0.0
-                routes_stats[route.config.route_id] = {
+
+                r_km = route.stats.total_tram_km
+                r_trips = route.stats.total_trips
+                r_rev = route.stats.total_revenue
+
+                cost_per_km = cfg.energy_per_km + cfg.maintenance_per_km + cfg.depreciation_per_km
+                cost_per_trip = cfg.payroll_per_trip + cfg.maintenance_fixed_per_trip
+                opex = (r_km * cost_per_km) + (r_trips * cost_per_trip)
+                marginal_profit = r_rev - opex
+                profit_per_km = marginal_profit / r_km if r_km > 0 else 0.0
+                ros = (marginal_profit / r_rev * 100) if r_rev > 0 else 0.0
+
+                routes_stats[cfg.route_id] = {
                     "passengers_estimated":       route.stats.total_passengers_estimated,
-                    "tram_km":                    route.stats.total_tram_km,
-                    "revenue":                    route.stats.total_revenue,
+                    "tram_km":                    r_km,
+                    "total_trips":                r_trips,
+                    "revenue":                    r_rev,
                     "headway_mae_min":            route_mae,
+                    "opex":                       opex,
+                    "marginal_profit":            marginal_profit,
+                    "profit_per_km":              profit_per_km,
+                    "ros_pct":                    ros,
                 }
+
+        # ── Глобальные агрегаты ────────────────────────────────────────────
+        g_total_trips = sum(rs["total_trips"] for rs in routes_stats.values())
+        g_opex = sum(rs["opex"] for rs in routes_stats.values())
+        g_marginal_profit = total_revenue - g_opex
+        g_profit_per_km = g_marginal_profit / total_km if total_km > 0 else 0.0
+        g_ros = (g_marginal_profit / total_revenue * 100) if total_revenue > 0 else 0.0
+
         return {
             "routes": routes_stats,
             "global": {
                 "total_tram_km":        total_km,
+                "total_trips":          g_total_trips,
                 "headway_mae_min":      headway_mae,
                 "total_revenue":        total_revenue,
                 "total_passengers_est": total_pax_est,
                 "unique_stops":         len(self.shared_stops),
+                "opex":                 g_opex,
+                "marginal_profit":      g_marginal_profit,
+                "profit_per_km":        g_profit_per_km,
+                "ros_pct":              g_ros,
             },
         }
 
     def _print_stats(self):
-        log.info(f"\n{'='*60}")
-        log.info("РЕЗУЛЬТАТЫ МУЛЬТИМАРШРУТНОЙ СИМУЛЯЦИИ")
-        log.info(f"{'='*60}")
+        results_log.info(f"\n{'='*60}")
+        results_log.info("РЕЗУЛЬТАТЫ МУЛЬТИМАРШРУТНОЙ СИМУЛЯЦИИ")
+        results_log.info(f"{'='*60}")
         stats = self.get_full_stats()
         for route_id, rs in stats["routes"].items():
-            log.info(f"\nМаршрут {route_id}:")
-            log.info(f"  • Пассажиры (расчёт):  {rs['passengers_estimated']:.0f}")
-            log.info(f"  • Трамвай-км:          {rs['tram_km']:.1f}")
-            log.info(f"  • Доход:               {rs['revenue']:.0f} руб.")
-            log.info(f"  • MAE интервалов:     {rs['headway_mae_min']:.2f} мин")
+            results_log.info(f"\nМаршрут {route_id}:")
+            results_log.info(f"  • Пассажиры (расчёт):  {rs['passengers_estimated']:.0f}")
+            results_log.info(f"  • Трамвай-км:          {rs['tram_km']:.1f}")
+            results_log.info(f"  • Рейсов:             {rs['total_trips']}")
+            results_log.info(f"  • Доход:               {rs['revenue']:.0f} руб.")
+            results_log.info(f"  • OpEx:                {rs['opex']:.0f} руб.")
+            results_log.info(f"  • Марж. прибыль:      {rs['marginal_profit']:.0f} руб.")
+            results_log.info(f"  • Прибыль/км:          {rs['profit_per_km']:.2f} руб.")
+            results_log.info(f"  • ROS:                 {rs['ros_pct']:.1f}%")
+            results_log.info(f"  • MAE интервалов:     {rs['headway_mae_min']:.2f} мин")
         g = stats["global"]
-        log.info(f"\nГлобально:")
-        log.info(f"  • Всего трамвай-км:   {g['total_tram_km']:.1f}")
-        log.info(f"  • Всего доход:       {g['total_revenue']:.0f} руб.")
-        log.info(f"  • Пассажиры (расч.): {g['total_passengers_est']:.0f}")
-        log.info(f"  • Уникальных ост.:    {g['unique_stops']}")
-        log.info(f"  • MAE интервалов:     {g['headway_mae_min']:.2f} мин")
-        log.info(f"{'='*60}\n")
+        results_log.info(f"\nГлобально:")
+        results_log.info(f"  • Всего трамвай-км:   {g['total_tram_km']:.1f}")
+        results_log.info(f"  • Всего рейсов:      {g['total_trips']}")
+        results_log.info(f"  • Всего доход:       {g['total_revenue']:.0f} руб.")
+        results_log.info(f"  • Всего OpEx:        {g['opex']:.0f} руб.")
+        results_log.info(f"  • Марж. прибыль:     {g['marginal_profit']:.0f} руб.")
+        results_log.info(f"  • Прибыль/км:        {g['profit_per_km']:.2f} руб.")
+        results_log.info(f"  • ROS:               {g['ros_pct']:.1f}%")
+        results_log.info(f"  • Пассажиры (расч.): {g['total_passengers_est']:.0f}")
+        results_log.info(f"  • Уникальных ост.:    {g['unique_stops']}")
+        results_log.info(f"  • MAE интервалов:     {g['headway_mae_min']:.2f} мин")
+        results_log.info(f"{'='*60}\n")
 

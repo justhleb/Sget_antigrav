@@ -6,3 +6,8 @@
 /tmp
 /__pycache__
 /cheat_sheets
+/ideal_charts
+visualization_ideal.py
+plot_pareto_ideal.py
+GEMINI.md
+/distances
