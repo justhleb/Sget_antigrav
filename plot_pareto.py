@@ -29,9 +29,27 @@ def plot_pareto(csv_path: str, out_dir: str = None):
     df = pd.read_csv(csv_path)
     out_dir = out_dir or os.path.dirname(csv_path) or "."
 
-    # Нормализуем доход (pymoo минимизирует, поэтому в исходных расчетах выручка могла быть отрицательной)
-    if "total_revenue" in df.columns:
-        df["total_revenue"] = df["total_revenue"].abs()
+    # Определяем ключевую финансовую метрику
+    if "marginal_profit" in df.columns:
+        fin_col = "marginal_profit"
+        fin_label = "Маржинальная прибыль (млн руб.)"
+        fin_short_label = "Прибыль"
+        fin_label_short_ru = "прибыль"
+        fin_label_short_ru_genitive = "прибыли"
+        is_mp = True
+    else:
+        fin_col = "total_revenue"
+        fin_label = "Доход (руб.)"
+        fin_short_label = "Доход"
+        fin_label_short_ru = "доход"
+        fin_label_short_ru_genitive = "дохода"
+        is_mp = False
+
+    # Нормализуем значения финансового показателя (pymoo минимизирует отрицательные значения)
+    if fin_col in df.columns:
+        df[fin_col] = df[fin_col].abs()
+        if is_mp:
+            df[fin_col] = df[fin_col] / 1e6
 
     # Суммарное число трамваев по каждому решению для цветовой нормализации
     total_trams = df[["n_20", "n_48", "n_55"]].sum(axis=1).values
@@ -53,7 +71,7 @@ def plot_pareto(csv_path: str, out_dir: str = None):
     def _annotate_extremes(ax, x_col, y_col):
         """Вспомогательный метод для добавления стрелок и текстовых аннотаций к экстремальным решениям."""
         candidates = {
-            "макс доход":  df["total_revenue"].idxmax()   if "total_revenue" in df.columns else None,
+            f"макс {fin_label_short_ru}":  df[fin_col].idxmax() if fin_col in df.columns else None,
             "мин mae":     df["headway_mae_min"].idxmin()  if "headway_mae_min" in df.columns else None,
         }
         for label, idx in candidates.items():
@@ -70,18 +88,18 @@ def plot_pareto(csv_path: str, out_dir: str = None):
 
     created = []
 
-    # ── 1. Основной 2D график: Выручка vs Точность интервалов (MAE) ──────────
+    # ── 1. Основной 2D график: Прибыль/Выручка vs Точность интервалов (MAE) ──────────
     fig, ax = plt.subplots(figsize=(10, 7))
-    sc = _scatter(ax, "total_revenue", "headway_mae_min",
-                  "Доход (руб.) →",
+    sc = _scatter(ax, fin_col, "headway_mae_min",
+                  f"{fin_label} →",
                   "← MAE интервалов (мин) — меньше лучше")
-    _annotate_extremes(ax, "total_revenue", "headway_mae_min")
+    _annotate_extremes(ax, fin_col, "headway_mae_min")
 
     cbar = fig.colorbar(sc, ax=ax)
     cbar.set_label("Суммарный парк (трамваев)", fontsize=9)
 
     ax.set_title(
-        "Pareto-фронт NSGA-II — Доход vs Качество интервалов\n"
+        f"Pareto-фронт NSGA-II — {fin_short_label} vs Качество интервалов\n"
         "Маршруты 20, 48, 55",
         fontsize=12, fontweight="bold",
     )
@@ -94,8 +112,8 @@ def plot_pareto(csv_path: str, out_dir: str = None):
 
     # ── 2. Столбчатый график: распределение парка для Топ-10 решений ──────────
     top_n = min(10, len(df))
-    # Сортируем решения по выручке и берем первые top_n
-    df_sorted = df.sort_values("total_revenue", ascending=False).head(top_n).reset_index(drop=True)
+    # Сортируем решения по прибыли/выручке и берем первые top_n
+    df_sorted = df.sort_values(fin_col, ascending=False).head(top_n).reset_index(drop=True)
 
     fig, ax = plt.subplots(figsize=(12, 6))
     x_pos = np.arange(top_n)
@@ -106,15 +124,16 @@ def plot_pareto(csv_path: str, out_dir: str = None):
     bars_48 = ax.bar(x_pos,         df_sorted["n_48"], width, label="Маршрут 48", color="#4CAF50", alpha=0.85)
     bars_55 = ax.bar(x_pos + width, df_sorted["n_55"], width, label="Маршрут 55", color="#FF9800", alpha=0.85)
 
-    # Добавляем текстовые подписи (Доход / MAE) над каждой группой столбцов
+    # Добавляем текстовые подписи (Показатель / MAE) над каждой группой столбцов
     for i in range(top_n):
-        total = df_sorted.loc[i, "total_revenue"]
+        total = df_sorted.loc[i, fin_col]
         mae   = df_sorted.loc[i, "headway_mae_min"]
+        label_str = f"{total:.2f} млн\n{mae:.1f}м" if is_mp else f"{total/1000:.0f}к\n{mae:.1f}м"
         ax.text(i, df_sorted.loc[i, ["n_20", "n_48", "n_55"]].max() + 0.5,
-                f"{total/1000:.0f}к\n{mae:.1f}м",
+                label_str,
                 ha="center", fontsize=7, color="darkred")
 
-    ax.set_xlabel("Решение (ранжировано по убыванию дохода)", fontsize=11)
+    ax.set_xlabel(f"Решение (ранжировано по убыванию {fin_label_short_ru_genitive})", fontsize=11)
     ax.set_ylabel("Количество трамваев", fontsize=11)
     ax.set_title(
         f"Топ-{top_n} решений Pareto: распределение парка по маршрутам",
@@ -132,20 +151,20 @@ def plot_pareto(csv_path: str, out_dir: str = None):
     print(f"Сохранён: {out_path}")
     created.append(out_path)
 
-    # ── 3. Размер парка vs Доход с цветовой индикацией точности ─────────────
+    # ── 3. Размер парка vs Прибыль/Доход с цветовой индикацией точности ─────────────
     if "total_trams" in df.columns:
         fig, ax = plt.subplots(figsize=(9, 6))
         # Цветовая шкала: RdYlGn_r (красный -> желтый -> зеленый, реверсивный). 
         # Зеленый — маленькая ошибка MAE (отлично), красный — большая ошибка.
         sc = ax.scatter(
-            df["total_trams"], df["total_revenue"],
+            df["total_trams"], df[fin_col],
             c=df["headway_mae_min"], cmap="RdYlGn_r",
             s=80, edgecolors="k", linewidths=0.4, alpha=0.9,
         )
         ax.set_xlabel("Суммарный парк (трамваев) →", fontsize=10)
-        ax.set_ylabel("Доход (руб.) →", fontsize=10)
+        ax.set_ylabel(f"{fin_label} →", fontsize=10)
         ax.set_title(
-            "Размер парка vs Доход (цвет = MAE интервалов)",
+            f"Размер парка vs {fin_short_label} (цвет = MAE интервалов)",
             fontsize=12, fontweight="bold",
         )
         cbar = fig.colorbar(sc, ax=ax)

@@ -113,11 +113,13 @@ class TramFleetProblem(ElementwiseProblem):
         # Запускаем симуляцию в тихом режиме (без построения графиков и сохранения логов)
         sim.run(plot_graphs=False, save_logs=False)
 
-        # Извлекаем агрегированные метрики симуляции
-        total_km, headway_mae, total_revenue, _ = sim.get_objectives()
+        # Извлекаем агрегированные метрики симуляции из детальной статистики
+        stats = sim.get_full_stats()
+        headway_mae = stats["global"]["headway_mae_min"]
+        marginal_profit = stats["global"]["marginal_profit"]
 
-        # Формируем вектор целевых функций (выручку берем с минусом для максимизации)
-        out["F"] = np.array([headway_mae, -total_revenue], dtype=float)
+        # Формируем вектор целевых функций (прибыль берем с минусом для максимизации)
+        out["F"] = np.array([headway_mae, -marginal_profit], dtype=float)
         # Формируем ограничение на вместимость парка (сумма ТС - лимит <= 0)
         out["G"] = np.array([sum(tram_counts) - self.n_max], dtype=float)
 
@@ -201,7 +203,7 @@ def _save_results(res, out_dir: str):
     :param out_dir: Папка для записи файлов.
     """
     X = res.X   # Векторы распределения трамваев: [n_20, n_48, n_55]
-    F = res.F   # Векторы целей: [headway_mae_min, -total_revenue]
+    F = res.F   # Векторы целей: [headway_mae_min, -marginal_profit]
 
     if X is None or F is None:
         print("\n[Внимание] Не найдено ни одного допустимого решения.")
@@ -210,16 +212,16 @@ def _save_results(res, out_dir: str):
     # Формируем DataFrame с результатами
     df = pd.DataFrame(
         np.hstack([X, F]),
-        columns=["n_20", "n_48", "n_55", "headway_mae_min", "total_revenue_neg"],
+        columns=["n_20", "n_48", "n_55", "headway_mae_min", "marginal_profit_neg"],
     )
-    # Переводим выручку обратно в положительные числа
-    df["total_revenue"] = -df["total_revenue_neg"]
-    df = df.drop(columns=["total_revenue_neg"])
+    # Переводим прибыль обратно в положительные числа
+    df["marginal_profit"] = -df["marginal_profit_neg"]
+    df = df.drop(columns=["marginal_profit_neg"])
     # Добавляем суммарное количество трамваев для проверки ограничения
     df["total_trams"] = df[["n_20", "n_48", "n_55"]].sum(axis=1)
 
-    # Сортируем решения по убыванию выручки (для удобства чтения)
-    df = df.sort_values("total_revenue", ascending=False)
+    # Сортируем решения по убыванию прибыли (для удобства чтения)
+    df = df.sort_values("marginal_profit", ascending=False)
     csv_path = os.path.join(out_dir, "pareto_front.csv")
     df.to_csv(csv_path, index=False)
     
@@ -240,4 +242,5 @@ def _save_results(res, out_dir: str):
 # ─── Точка входа для локального тестирования оптимизатора ───────────────────
 
 if __name__ == "__main__":
-    run_nsga2(n_max=N_MAX, pop_size=25, n_gen=5)
+    # Тестовый прогон на 60 трамваев с увеличенными параметрами для получения богатого Парето-фронта
+    run_nsga2(n_max=60, pop_size=40, n_gen=15)

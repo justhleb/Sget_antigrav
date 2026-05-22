@@ -110,7 +110,7 @@ project/
 
 В начале дня трамваи выпускаются из депо строго с целевым интервалом текущего часа:
 
-$$interval = target\_interval(hour)$$
+$$\text{interval} = \text{target\_interval}(\text{hour})$$
 
 Например, для маршрута 20 до 07:00 целевой интервал 23 мин — значит трамваи выходят на линию с шагом 23 минуты, пока весь парк не будет на маршруте.
 
@@ -118,39 +118,39 @@ $$interval = target\_interval(hour)$$
 
 После завершения круга (fwd → разворот → bwd → отдых 15 мин) трамвай не выпускается сразу, а ожидает до момента, когда с последнего выпуска пройдёт `target_interval` минут:
 
-$$next\_dispatch = last\_dispatch\_time + target\_interval(now)$$
+$$\text{next\_dispatch} = \text{last\_dispatch\_time} + \text{target\_interval}(\text{now})$$
 
 * Если трамвай **готов раньше** `next_dispatch` — он ждёт в депо до нужного момента, поддерживая идеальный интервал.
 * Если трамвай **опоздал** (вернулся после `next_dispatch`) — выпускается сразу, чтобы минимизировать разрыв.
 
-При отсутствии данных о целевых интервалах используется fallback-расчёт: $interval = round\_trip / N$.
+При отсутствии данных о целевых интервалах используется fallback-расчёт: $\text{interval} = \text{round\_trip} / N$.
 
 ### 3.4 Макро-Экономическая Модель (Доходы, Расходы и Рентабельность)
 
 Симуляция использует **Top-Down (сверху-вниз)** экономический подход:
 
 1. **Выручка за рейс** складывается из дохода от пассажиров (выручка из Excel-отчетов по пробегу) и дохода от исполнения контракта (фиксированный тариф за каждый пройденный километр):
-   $$Revenue_{trip} = Revenue_{passenger} + Revenue_{contract}$$
+   $$\text{Revenue}_{\text{trip}} = \text{Revenue}_{\text{passenger}} + \text{Revenue}_{\text{contract}}$$
    * *Доход от пассажиров*:
-     $$Revenue_{passenger} = run\_km \times revenue\_per\_km$$
+     $$\text{Revenue}_{\text{passenger}} = \text{run\_km} \times \text{revenue\_per\_km}$$
    * *Доход от контракта* (фиксированный тариф `contract_revenue_per_km` = 529.5 руб./км):
-     $$Revenue_{contract} = run\_km \times contract\_revenue\_per\_km$$
+     $$\text{Revenue}_{\text{contract}} = \text{run\_km} \times \text{contract\_revenue\_per\_km}$$
 2. **Пассажиропоток** оценивается макро-методом на основании пробега и средних исторических данных:
-   $$Passengers\_est_{trip} = run\_km \times passengers\_per\_km$$
+   $$\text{Passengers\_est}_{\text{trip}} = \text{run\_km} \times \text{passengers\_per\_km}$$
 3. **Операционные расходы (OpEx)** рассчитываются на основе пробежных и рейсовых нормативов, заложенных в конфигурационных JSON-файлах:
    * *Пробежные расходы (руб/км)*: энергия (`energy_per_km`), ТОиР (`maintenance_per_km` — равен 0, так как весь ТОиР перенесён в рейсовую часть) и амортизация (`depreciation_per_km`).
-     $$cost\_per\_km = energy\_per\_km + maintenance\_per\_km + depreciation\_per\_km$$
+     $$\text{cost\_per\_km} = \text{energy\_per\_km} + \text{maintenance\_per\_km} + \text{depreciation\_per\_km}$$
    * *Рейсовые расходы (руб/рейс)*: ФОТ водителя (`payroll_per_trip`) и фиксированный ТОиР (`maintenance_fixed_per_trip`).
-     $$cost\_per\_trip = payroll\_per\_trip + maintenance\_fixed\_per\_trip$$
+     $$\text{cost\_per\_trip} = \text{payroll\_per\_trip} + \text{maintenance\_fixed\_per\_trip}$$
    * *Итоговый OpEx рейса*:
-     $$OpEx_{trip} = (run\_km \times cost\_per\_km) + cost\_per\_trip$$
+     $$\text{OpEx}_{\text{trip}} = (\text{run\_km} \times \text{cost\_per\_km}) + \text{cost\_per\_trip}$$
 4. **Финансовый результат** (считается по совокупному доходу):
    * *Маржинальная прибыль*:
-     $$Marginal\_Profit = Revenue - OpEx$$
+     $$\text{Marginal\_Profit} = \text{Revenue} - \text{OpEx}$$
    * *Прибыль на километр*:
-     $$Profit\_per\_km = \frac{Marginal\_Profit}{run\_km}$$
+     $$\text{Profit\_per\_km} = \frac{\text{Marginal\_Profit}}{\text{run\_km}}$$
    * *Рентабельность продаж (ROS, %)*:
-     $$ROS = \frac{Marginal\_Profit}{Revenue} \times 100\%$$
+     $$\text{ROS} = \frac{\text{Marginal\_Profit}}{\text{Revenue}} \times 100\%$$
 5. Модуль `excel_parser.py` автоматически считывает `summary_reports_*.xlsx` для получения средних метрик эффективности конкретного подвижного состава и формирует нормативы перед стартом.
 6. **Исправление расчёта дистанций**: Длина маршрута рассчитывается последовательным суммированием сегментов из `distances_list` для обхода багов с дублированием идентификаторов остановок на некоторых маршрутах.
 
@@ -192,8 +192,8 @@ $$\text{speed} = \text{flow\_speed} \times \text{load}$$
 
 #### Влияние штрафов на финансовые KPI:
 Сумма всех наложенных суточных штрафов вычитается из маржинальной прибыли (`Marginal_Profit`) и, соответственно, снижает удельную прибыль на километр (`Profit_per_km`) и общую рентабельность (`ROS %`):
-$$Marginal\_Profit = Revenue - OpEx - Total\_Penalties$$
-$$ROS = \frac{Marginal\_Profit}{Revenue} \times 100\%$$
+$$\text{Marginal\_Profit} = \text{Revenue} - \text{OpEx} - \text{Total\_Penalties}$$
+$$\text{ROS} = \frac{\text{Marginal\_Profit}}{\text{Revenue}} \times 100\%$$
 
 ---
 
@@ -451,12 +451,12 @@ outputs/run_2026.../
 
 **Целевые функции (2D-Парето):**
 
-1. **`total_revenue`** (Максимизация) — выжимаем чистый доход
+1. **`marginal_profit`** (Максимизация) — выжимаем чистую маржинальную прибыль с учётом операционных расходов (OpEx) и всех начисленных суточных штрафов за нарушение регулярности движения
 2. **`headway_mae`** (Минимизация) — обеспечиваем соблюдение плановых интервалов, снижаем среднюю абсолютную ошибку (в минутах)
 
 **Ограничения:**
 
-- Суммарный парк трамваев (`N_MAX`): контрактное ограничение в **67 единиц**.
+- Суммарный парк трамваев (`N_MAX`): контрактное ограничение в **67 единиц** (при тестировании дефицитных сценариев может быть снижено, например, до **60 единиц**).
 - Индивидуальные максимумы по маршрутам: **21 ТС (маршрут 20), 16 ТС (маршрут 48), 30 ТС (маршрут 55)**.
 
 ### Запуск и визуализация
@@ -467,6 +467,6 @@ python run_optimizer.py
 
 После работы генерируются новые графики (`plot_pareto.py`):
 
-1. **`pareto_revenue_vs_mae.png`** (Доход против Интервальной погрешности). Показывает классический Trade-Off: чем больше доход (набивка вагонов + пройденный путь), тем потенциально выше отклонения из-за недостатка резервов парка.
+1. **`pareto_revenue_vs_mae.png`** (Маржинальная прибыль против Интервальной погрешности). Показывает классический Trade-Off: баланс между маржинальной прибылью (с учётом расходов и штрафов) и точностью интервалов.
 2. **`pareto_fleet_distribution.png` (Fleet Bar-Chart)** — Показывает распределение парка среди трех маршрутов для лучших экономических решений.
-3. **`pareto_fleet_vs_revenue.png`** — Рассеяние: как общий размер парка коррелирует с итоговыми доходами.
+3. **`pareto_fleet_vs_revenue.png`** — Рассеяние: как общий размер парка коррелирует с итоговой маржинальной прибылью.
