@@ -7,7 +7,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
-from typing import List
+from typing import Dict, List
 
 import simpy
 import numpy as np
@@ -36,7 +36,7 @@ class Stop:
 
         self.waiting_passengers: int = 0
         self.last_tram_time: float = 0.0
-        self.last_tram_departure_time: float = None
+        self.last_tram_departure_time: Dict[str, float] = {}  # per route_id
 
         # Агрегированная статистика
         self.total_waiting_time: float = 0.0

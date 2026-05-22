@@ -114,10 +114,11 @@ class Tram:
         planned_time: float,
         actual_time: float,
         headway_error: float,
+        route_id: str | None = None,
     ):
         self.stats.schedule_deviations.append({
             "tram_id":      self.tram_id,
-            "route_id":     self.route_id,
+            "route_id":     route_id or self.route_id,
             "stop_id":      stop_id,
             "planned_time": planned_time,
             "actual_time":  actual_time,

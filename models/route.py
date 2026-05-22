@@ -34,7 +34,9 @@ class RouteStats:
     total_passengers_served: int = 0
     total_tram_km: float = 0.0
     total_passenger_km: float = 0.0
-    total_revenue: float = 0.0          # руб. (расчет: пробег * revenue_per_km)
+    total_passenger_revenue: float = 0.0 # руб. (доход от пассажиров)
+    total_contract_revenue: float = 0.0  # руб. (доход от контракта)
+    total_revenue: float = 0.0          # руб. (совокупный доход)
     total_passengers_estimated: float = 0.0  # расчетные пассажиры (пробег * pax_per_km)
     total_trips: int = 0                # количество завершённых рейсов
     utilization_deviations: List[float] = field(default_factory=list)
@@ -52,6 +54,7 @@ class RouteConfig:
     simulation_hours: int
     distances: Dict[int, float]
     road_loads: Dict[int, float]
+    distances_list: List[float] = field(default_factory=list)
     depot_to_first_stop: float = 8.0
     min_rest_time: float = 15.0
     turnaround_time: float = DEFAULT_TURNAROUND
@@ -64,6 +67,7 @@ class RouteConfig:
     revenue_per_km: float = 0.0       # руб. средний доход на 1 км пути
     passengers_per_km: float = 0.0    # чел. среднее кол-во пасс. на 1 км
     # ── Расходные параметры (из JSON-конфигов) ────────────────────────────
+    contract_revenue_per_km: float = 529.5  # руб. за км от исполнения контракта
     energy_per_km: float = 0.0              # энергия на км, руб.
     maintenance_per_km: float = 0.0         # ТОиР на км (пробежный), руб.
     depreciation_per_km: float = 0.0        # амортизация на км, руб.
@@ -80,6 +84,7 @@ class RouteConfig:
             c = json.load(f)
 
         distances = {item[0]: item[1] for item in c["distance"]}
+        distances_list = [float(item[1]) for item in c["distance"]]
 
         road_loads = {hour: load for hour, load in c["road_loads"]}
 
@@ -113,6 +118,7 @@ class RouteConfig:
             simulation_hours=c["simulation_hours"],
             distances=distances,
             road_loads=road_loads,
+            distances_list=distances_list,
             depot_to_first_stop=c.get("depot_to_first_stop", 8.0),
             min_rest_time=c.get("min_rest_time", 15.0),
             turnaround_time=c.get("turnaround_time", DEFAULT_TURNAROUND),
@@ -121,6 +127,7 @@ class RouteConfig:
             target_utilization=c.get("target_utilization", DEFAULT_TARGET_UTIL),
             random_seed=c.get("random_seed", None),
             target_intervals=target_intervals,
+            contract_revenue_per_km=c.get("contract_revenue_per_km", 529.5),
             energy_per_km=c.get("energy_per_km", 0.0),
             maintenance_per_km=c.get("maintenance_per_km", 0.0),
             depreciation_per_km=c.get("depreciation_per_km", 0.0),
@@ -227,8 +234,7 @@ class Route:
 
             for i, stop_id in enumerate(cfg.stop_ids):
                 if i > 0:
-                    prev_stop_id = cfg.stop_ids[i - 1]
-                    distance    = cfg.distances.get(prev_stop_id, 0.0)
+                    distance    = cfg.distances_list[i - 1] if i - 1 < len(cfg.distances_list) else 0.0
                     travel_time = self._calculate_travel_time(distance, self.env.now)
 
                     km = distance / 1000.0
@@ -242,9 +248,13 @@ class Route:
                 )
 
             # ── Макро-экономическая оценка рейса ──────────────────────────────
-            trip_revenue        = trip_km * cfg.revenue_per_km
+            trip_passenger_revenue = trip_km * cfg.revenue_per_km
+            trip_contract_revenue  = trip_km * cfg.contract_revenue_per_km
+            trip_revenue        = trip_passenger_revenue + trip_contract_revenue
             trip_passengers_est = trip_km * cfg.passengers_per_km
 
+            self.stats.total_passenger_revenue    += trip_passenger_revenue
+            self.stats.total_contract_revenue     += trip_contract_revenue
             self.stats.total_revenue              += trip_revenue
             self.stats.total_passengers_estimated  += trip_passengers_est
             self.stats.total_passengers_served     += int(trip_passengers_est)
@@ -256,7 +266,7 @@ class Route:
                 f"трамвай #{tram.tram_id} завершил прогон "
                 f"(рейс #{trip_id}, "
                 f"km={trip_km:.2f}, "
-                f"rev={trip_revenue:.0f} руб., "
+                f"rev={trip_revenue:.0f} руб. (пасс: {trip_passenger_revenue:.0f}, контр: {trip_contract_revenue:.0f}), "
                 f"pax_est={trip_passengers_est:.0f})"
             )
 
@@ -305,11 +315,13 @@ class Route:
                     target_headway = self.config.target_intervals[direction_key].get(hour_str, 0.0)
 
         headway_error = 0.0
-        if stop.last_tram_departure_time is not None and target_headway > 0:
-            actual_headway = departure_time - stop.last_tram_departure_time
+        route_id = self.config.route_id
+        prev_departure = stop.last_tram_departure_time.get(route_id)
+        if prev_departure is not None and target_headway > 0:
+            actual_headway = departure_time - prev_departure
             headway_error = abs(actual_headway - target_headway)
 
-        stop.last_tram_departure_time = departure_time
+        stop.last_tram_departure_time[route_id] = departure_time
 
         # ── Логирование ───────────────────────────────────────────────────
         tram.log_stop_event(
@@ -330,6 +342,7 @@ class Route:
             planned_time=self.env.now,
             actual_time=self.env.now,
             headway_error=headway_error,
+            route_id=self.config.route_id,
         )
 
         stop.log_event(StopEvent(

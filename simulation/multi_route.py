@@ -63,6 +63,8 @@ class TramPair:
         self.fwd_done = simpy.Store(env)
         self.bwd_done = simpy.Store(env)
 
+        self.last_fwd_dispatch_time: float = 0.0  # время последнего выпуска на fwd
+
         self.fwd = Route(fwd_config, env, shared_stops,
                          available_trams=self.pool,
                          done_store=self.fwd_done)
@@ -88,37 +90,54 @@ class TramPair:
         self.bwd.start()
         self.env.process(self._turnaround_process())
         self.env.process(self._rest_process())
-        self.env.process(self._staggered_release())
+        self.env.process(self._interval_aware_release())
 
-    def _calc_dispatch_interval(self) -> float:
-        """Оценка интервала между выпусками = время_кругорейса / N."""
-        fwd_km = sum(self.fwd.config.distances.values()) / 1000
-        bwd_km = sum(self.bwd.config.distances.values()) / 1000
+    def _get_target_interval(self, t_min: float) -> float:
+        """Целевой интервал (мин) для fwd-маршрута на момент t_min."""
+        intervals = self.fwd.config.target_intervals
+        if not intervals:
+            return self._calc_fallback_interval()
+        direction_key = list(intervals.keys())[0]
+        direction_intervals = intervals[direction_key]
+        hour = int(t_min // 60) % 24
+        if hour < 7:
+            hour_str = "before_07:00"
+        elif hour == 23:
+            hour_str = "23:00-24:00"
+        else:
+            hour_str = f"{hour:02d}:00-{hour+1:02d}:00"
+        return direction_intervals.get(hour_str, self._calc_fallback_interval())
+
+    def _calc_fallback_interval(self) -> float:
+        """Fallback: оценка интервала = время_кругорейса / N."""
+        fwd_km = sum(self.fwd.config.distances_list) / 1000
+        bwd_km = sum(self.bwd.config.distances_list) / 1000
         eff_speed = max(
             self.fwd.config.flow_speed * (1 - DEFAULT_ROAD_LOAD_ESTIMATE),
             5.0,
         )
         travel_min = (fwd_km + bwd_km) / eff_speed * 60
         n_stops = len(self.fwd.config.stop_ids) + len(self.bwd.config.stop_ids)
-        dwell_min = n_stops * 1.0  # ~1 мин на остановку
+        dwell_min = n_stops * 1.0
         turnaround = self.fwd.config.turnaround_time
         rest = max(self.fwd.config.min_rest_time, MIN_REST_TIME)
         round_trip = travel_min + dwell_min + turnaround + rest
         n = max(len(self.all_trams), 1)
-        interval = round_trip / n
-        log.info(
-            f"[TramPair {self.route_num}] Оценка кругорейса: {round_trip:.0f} мин, "
-            f"интервал выпуска: {interval:.1f} мин"
-        )
-        return interval
+        return round_trip / n
 
-    def _staggered_release(self):
-        """Выпускает трамваи из депо с равным интервалом."""
-        interval = self._calc_dispatch_interval()
+    def _interval_aware_release(self):
+        """Утренний выпуск трамваев с целевым интервалом текущего часа."""
         for i, tram in enumerate(self.all_trams):
-            yield self.pool.put(tram)
-            if i < len(self.all_trams) - 1:
+            if i > 0:
+                interval = self._get_target_interval(self.env.now)
                 yield self.env.timeout(interval)
+            self.last_fwd_dispatch_time = self.env.now
+            log.info(
+                f"[{self.env.now:.1f}] [TramPair {self.route_num}] "
+                f"Утренний выпуск #{tram.tram_id}, "
+                f"интервал={self._get_target_interval(self.env.now):.0f} мин"
+            )
+            yield self.pool.put(tram)
 
     def _turnaround_process(self):
         """fwd завершён → разворот → трамвай доступен для bwd."""
@@ -133,7 +152,7 @@ class TramPair:
             yield self.fwd_done.put(tram)
 
     def _rest_process(self):
-        """bwd завершён → отдых водителя → трамвай обратно в депо."""
+        """bwd завершён → отдых → ожидание целевого интервала → депо."""
         rest_time = max(self.fwd.config.min_rest_time, MIN_REST_TIME)
         while True:
             tram = yield self.bwd_done.get()
@@ -142,9 +161,29 @@ class TramPair:
                 f"в депо, отдых {rest_time:.0f} мин"
             )
             yield self.env.timeout(rest_time)
+
+            # Ждём до целевого интервала с момента последнего выпуска
+            target_interval = self._get_target_interval(self.env.now)
+            next_dispatch = self.last_fwd_dispatch_time + target_interval
+            wait = next_dispatch - self.env.now
+
+            if wait > 0:
+                log.info(
+                    f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
+                    f"ожидает {wait:.1f} мин до целевого интервала "
+                    f"({target_interval:.0f} мин)"
+                )
+                yield self.env.timeout(wait)
+            else:
+                log.info(
+                    f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
+                    f"опоздание на {-wait:.1f} мин — выпуск сразу"
+                )
+
+            self.last_fwd_dispatch_time = self.env.now
             log.info(
                 f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
-                f"готов к новому рейсу"
+                f"выпущен на линию"
             )
             yield self.pool.put(tram)
 
@@ -167,6 +206,8 @@ class MultiRouteSimulation:
             self.run_dir = None
         elif run_dir is not None:
             self.run_dir = run_dir
+            os.makedirs(os.path.join(run_dir, "logs"),  exist_ok=True)
+            os.makedirs(os.path.join(run_dir, "plots"), exist_ok=True)
         else:
             self.run_dir = self._create_run_directory()
 
@@ -284,9 +325,55 @@ class MultiRouteSimulation:
             pair.start()
 
         self.env.run(until=self._max_hours() * 60)
-        self._print_stats()
+        stats = self.get_full_stats()
+        summary_text = self.generate_summary_text(stats)
+        self._print_stats(summary_text)
 
         if save_logs and self.run_dir:
+            # Сохранение текстового отчёта
+            with open(os.path.join(self.run_dir, "simulation_summary.txt"), "w", encoding="utf-8") as f:
+                f.write(summary_text)
+
+            # Сохранение CSV отчёта
+            import csv
+            csv_path = os.path.join(self.run_dir, "simulation_summary.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f, delimiter=";")
+                writer.writerow([
+                    "Объект", "Пассажиры (расчет)", "Трамвай-км", "Рейсы", 
+                    "Совокупный Доход", "Пассажирский Доход", "Контрактный Доход", 
+                    "OpEx", "Маржинальная Прибыль", "Прибыль/км", "ROS %", "MAE интервалов"
+                ])
+                
+                for pair in self.pairs:
+                    for direction in ("fwd", "bwd"):
+                        rid = f"{pair.route_num}_{direction}"
+                        rs = stats["routes"].get(rid)
+                        if rs:
+                            writer.writerow([
+                                rid, f"{rs['passengers_estimated']:.0f}", f"{rs['tram_km']:.1f}", str(rs['total_trips']),
+                                f"{rs['revenue']:.0f}", f"{rs['passenger_revenue']:.0f}", f"{rs['contract_revenue']:.0f}",
+                                f"{rs['opex']:.0f}", f"{rs['marginal_profit']:.0f}", f"{rs['profit_per_km']:.2f}",
+                                f"{rs['ros_pct']:.1f}", f"{rs['headway_mae_min']:.2f}"
+                            ])
+                            
+                    rt = stats["route_totals"].get(pair.route_num)
+                    if rt:
+                        writer.writerow([
+                            f"{pair.route_num}_общий", f"{rt['passengers_estimated']:.0f}", f"{rt['tram_km']:.1f}", str(rt['total_trips']),
+                            f"{rt['revenue']:.0f}", f"{rt['passenger_revenue']:.0f}", f"{rt['contract_revenue']:.0f}",
+                            f"{rt['opex']:.0f}", f"{rt['marginal_profit']:.0f}", f"{rt['profit_per_km']:.2f}",
+                            f"{rt['ros_pct']:.1f}", f"{rt['headway_mae_min']:.2f}"
+                        ])
+                        
+                g = stats["global"]
+                writer.writerow([
+                    "Глобально", f"{g['total_passengers_est']:.0f}", f"{g['total_tram_km']:.1f}", str(g['total_trips']),
+                    f"{g['total_revenue']:.0f}", f"{g['total_passenger_revenue']:.0f}", f"{g['total_contract_revenue']:.0f}",
+                    f"{g['opex']:.0f}", f"{g['marginal_profit']:.0f}", f"{g['profit_per_km']:.2f}",
+                    f"{g['ros_pct']:.1f}", f"{g['headway_mae_min']:.2f}"
+                ])
+
             logs_dir = os.path.join(self.run_dir, "logs")
             for pair in self.pairs:
                 route_logs = os.path.join(logs_dir, pair.route_num)
@@ -375,7 +462,10 @@ class MultiRouteSimulation:
     def get_full_stats(self) -> dict:
         total_km, headway_mae, total_revenue, total_pax_est = self.get_objectives()
         routes_stats = {}
+        route_totals = {}
+        
         for pair in self.pairs:
+            # Сперва рассчитываем fwd и bwd индивидуально
             for route in (pair.fwd, pair.bwd):
                 cfg = route.config
                 route_errors = [
@@ -389,6 +479,8 @@ class MultiRouteSimulation:
                 r_km = route.stats.total_tram_km
                 r_trips = route.stats.total_trips
                 r_rev = route.stats.total_revenue
+                r_pax_rev = route.stats.total_passenger_revenue
+                r_cnt_rev = route.stats.total_contract_revenue
 
                 cost_per_km = cfg.energy_per_km + cfg.maintenance_per_km + cfg.depreciation_per_km
                 cost_per_trip = cfg.payroll_per_trip + cfg.maintenance_fixed_per_trip
@@ -402,6 +494,8 @@ class MultiRouteSimulation:
                     "tram_km":                    r_km,
                     "total_trips":                r_trips,
                     "revenue":                    r_rev,
+                    "passenger_revenue":          r_pax_rev,
+                    "contract_revenue":           r_cnt_rev,
                     "headway_mae_min":            route_mae,
                     "opex":                       opex,
                     "marginal_profit":            marginal_profit,
@@ -409,20 +503,60 @@ class MultiRouteSimulation:
                     "ros_pct":                    ros,
                 }
 
+            # Затем рассчитываем агрегированную статистику по маршруту в целом
+            fwd_s = routes_stats[pair.fwd.config.route_id]
+            bwd_s = routes_stats[pair.bwd.config.route_id]
+            
+            tot_km = fwd_s["tram_km"] + bwd_s["tram_km"]
+            tot_trips = fwd_s["total_trips"] + bwd_s["total_trips"]
+            tot_rev = fwd_s["revenue"] + bwd_s["revenue"]
+            tot_pax_rev = fwd_s["passenger_revenue"] + bwd_s["passenger_revenue"]
+            tot_cnt_rev = fwd_s["contract_revenue"] + bwd_s["contract_revenue"]
+            tot_opex = fwd_s["opex"] + bwd_s["opex"]
+            tot_margin = tot_rev - tot_opex
+            tot_pax = fwd_s["passengers_estimated"] + bwd_s["passengers_estimated"]
+            
+            pair_errors = [
+                abs(d["headway_error_min"])
+                for t in pair.all_trams
+                for d in t.stats.schedule_deviations
+                if d["route_id"].split("_")[0] == pair.route_num and d.get("headway_error_min") is not None
+            ]
+            pair_mae = sum(pair_errors) / len(pair_errors) if pair_errors else 0.0
+            
+            route_totals[pair.route_num] = {
+                "passengers_estimated":       tot_pax,
+                "tram_km":                    tot_km,
+                "total_trips":                tot_trips,
+                "revenue":                    tot_rev,
+                "passenger_revenue":          tot_pax_rev,
+                "contract_revenue":           tot_cnt_rev,
+                "headway_mae_min":            pair_mae,
+                "opex":                       tot_opex,
+                "marginal_profit":            tot_margin,
+                "profit_per_km":              tot_margin / tot_km if tot_km > 0 else 0.0,
+                "ros_pct":                    (tot_margin / tot_rev * 100) if tot_rev > 0 else 0.0,
+            }
+
         # ── Глобальные агрегаты ────────────────────────────────────────────
         g_total_trips = sum(rs["total_trips"] for rs in routes_stats.values())
         g_opex = sum(rs["opex"] for rs in routes_stats.values())
         g_marginal_profit = total_revenue - g_opex
         g_profit_per_km = g_marginal_profit / total_km if total_km > 0 else 0.0
         g_ros = (g_marginal_profit / total_revenue * 100) if total_revenue > 0 else 0.0
+        g_passenger_revenue = sum(rs["passenger_revenue"] for rs in routes_stats.values())
+        g_contract_revenue = sum(rs["contract_revenue"] for rs in routes_stats.values())
 
         return {
             "routes": routes_stats,
+            "route_totals": route_totals,
             "global": {
                 "total_tram_km":        total_km,
                 "total_trips":          g_total_trips,
                 "headway_mae_min":      headway_mae,
                 "total_revenue":        total_revenue,
+                "total_passenger_revenue": g_passenger_revenue,
+                "total_contract_revenue":  g_contract_revenue,
                 "total_passengers_est": total_pax_est,
                 "unique_stops":         len(self.shared_stops),
                 "opex":                 g_opex,
@@ -432,33 +566,66 @@ class MultiRouteSimulation:
             },
         }
 
-    def _print_stats(self):
-        results_log.info(f"\n{'='*60}")
-        results_log.info("РЕЗУЛЬТАТЫ МУЛЬТИМАРШРУТНОЙ СИМУЛЯЦИИ")
-        results_log.info(f"{'='*60}")
-        stats = self.get_full_stats()
-        for route_id, rs in stats["routes"].items():
-            results_log.info(f"\nМаршрут {route_id}:")
-            results_log.info(f"  • Пассажиры (расчёт):  {rs['passengers_estimated']:.0f}")
-            results_log.info(f"  • Трамвай-км:          {rs['tram_km']:.1f}")
-            results_log.info(f"  • Рейсов:             {rs['total_trips']}")
-            results_log.info(f"  • Доход:               {rs['revenue']:.0f} руб.")
-            results_log.info(f"  • OpEx:                {rs['opex']:.0f} руб.")
-            results_log.info(f"  • Марж. прибыль:      {rs['marginal_profit']:.0f} руб.")
-            results_log.info(f"  • Прибыль/км:          {rs['profit_per_km']:.2f} руб.")
-            results_log.info(f"  • ROS:                 {rs['ros_pct']:.1f}%")
-            results_log.info(f"  • MAE интервалов:     {rs['headway_mae_min']:.2f} мин")
+    def generate_summary_text(self, stats: dict) -> str:
+        lines = []
+        lines.append(f"\n{'='*60}")
+        lines.append("РЕЗУЛЬТАТЫ МУЛЬТИМАРШРУТНОЙ СИМУЛЯЦИИ")
+        lines.append("="*60)
+        
+        for pair in self.pairs:
+            for direction in ("fwd", "bwd"):
+                rid = f"{pair.route_num}_{direction}"
+                rs = stats["routes"].get(rid)
+                if rs:
+                    lines.append(f"\nМаршрут {rid}:")
+                    lines.append(f"  • Пассажиры (расчёт):  {rs['passengers_estimated']:.0f}")
+                    lines.append(f"  • Трамвай-км:          {rs['tram_km']:.1f}")
+                    lines.append(f"  • Рейсов:             {rs['total_trips']}")
+                    lines.append(f"  • Совокупный Доход:    {rs['revenue']:.0f} руб.")
+                    lines.append(f"    - Пассажиры:         {rs['passenger_revenue']:.0f} руб.")
+                    lines.append(f"    - Контракт:          {rs['contract_revenue']:.0f} руб.")
+                    lines.append(f"  • OpEx:                {rs['opex']:.0f} руб.")
+                    lines.append(f"  • Марж. прибыль:      {rs['marginal_profit']:.0f} руб.")
+                    lines.append(f"  • Прибыль/км:          {rs['profit_per_km']:.2f} руб.")
+                    lines.append(f"  • ROS:                 {rs['ros_pct']:.1f}%")
+                    lines.append(f"  • MAE интервалов:     {rs['headway_mae_min']:.2f} мин")
+            
+            rt = stats["route_totals"].get(pair.route_num)
+            if rt:
+                lines.append(f"\nМаршрут {pair.route_num} общий:")
+                lines.append(f"  • Пассажиры (расчёт):  {rt['passengers_estimated']:.0f}")
+                lines.append(f"  • Трамвай-км:          {rt['tram_km']:.1f}")
+                lines.append(f"  • Рейсов:             {rt['total_trips']}")
+                lines.append(f"  • Совокупный Доход:    {rt['revenue']:.0f} руб.")
+                lines.append(f"    - Пассажиры:         {rt['passenger_revenue']:.0f} руб.")
+                lines.append(f"    - Контракт:          {rt['contract_revenue']:.0f} руб.")
+                lines.append(f"  • OpEx:                {rt['opex']:.0f} руб.")
+                lines.append(f"  • Марж. прибыль:      {rt['marginal_profit']:.0f} руб.")
+                lines.append(f"  • Прибыль/км:          {rt['profit_per_km']:.2f} руб.")
+                lines.append(f"  • ROS:                 {rt['ros_pct']:.1f}%")
+                lines.append(f"  • MAE интервалов:     {rt['headway_mae_min']:.2f} мин")
+                
         g = stats["global"]
-        results_log.info(f"\nГлобально:")
-        results_log.info(f"  • Всего трамвай-км:   {g['total_tram_km']:.1f}")
-        results_log.info(f"  • Всего рейсов:      {g['total_trips']}")
-        results_log.info(f"  • Всего доход:       {g['total_revenue']:.0f} руб.")
-        results_log.info(f"  • Всего OpEx:        {g['opex']:.0f} руб.")
-        results_log.info(f"  • Марж. прибыль:     {g['marginal_profit']:.0f} руб.")
-        results_log.info(f"  • Прибыль/км:        {g['profit_per_km']:.2f} руб.")
-        results_log.info(f"  • ROS:               {g['ros_pct']:.1f}%")
-        results_log.info(f"  • Пассажиры (расч.): {g['total_passengers_est']:.0f}")
-        results_log.info(f"  • Уникальных ост.:    {g['unique_stops']}")
-        results_log.info(f"  • MAE интервалов:     {g['headway_mae_min']:.2f} мин")
-        results_log.info(f"{'='*60}\n")
+        lines.append(f"\nГлобально:")
+        lines.append(f"  • Всего трамвай-км:   {g['total_tram_km']:.1f}")
+        lines.append(f"  • Всего рейсов:      {g['total_trips']}")
+        lines.append(f"  • Всего доход:       {g['total_revenue']:.0f} руб.")
+        lines.append(f"    - Пассажиры:       {g['total_passenger_revenue']:.0f} руб.")
+        lines.append(f"    - Контракт:        {g['total_contract_revenue']:.0f} руб.")
+        lines.append(f"  • Всего OpEx:        {g['opex']:.0f} руб.")
+        lines.append(f"  • Марж. прибыль:     {g['marginal_profit']:.0f} руб.")
+        lines.append(f"  • Прибыль/км:        {g['profit_per_km']:.2f} руб.")
+        lines.append(f"  • ROS:               {g['ros_pct']:.1f}%")
+        lines.append(f"  • Пассажиры (расч.): {g['total_passengers_est']:.0f}")
+        lines.append(f"  • Unique stops:      {g['unique_stops']}")
+        lines.append(f"  • MAE интервалов:     {g['headway_mae_min']:.2f} мин")
+        lines.append(f"{'='*60}\n")
+        
+        return "\n".join(lines)
+
+    def _print_stats(self, summary_text: Optional[str] = None):
+        if summary_text is None:
+            stats = self.get_full_stats()
+            summary_text = self.generate_summary_text(stats)
+        results_log.info(summary_text)
 

@@ -230,6 +230,7 @@ def create_config(
         "turnaround_time":      turnaround_time,
         "target_utilization":   target_utilization,
         "random_seed":          random_seed,
+        "contract_revenue_per_km": 529.5,
     }
 
     save_config_compact(config, output_file)
