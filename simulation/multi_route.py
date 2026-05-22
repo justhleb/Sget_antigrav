@@ -130,7 +130,13 @@ class TramPair:
         for i, tram in enumerate(self.all_trams):
             if i > 0:
                 interval = self._get_target_interval(self.env.now)
+                target_time = self.env.now + interval
                 yield self.env.timeout(interval)
+            else:
+                target_time = 0.0
+
+            tram.target_release_time = target_time
+            tram.actual_release_time = self.env.now
             self.last_fwd_dispatch_time = self.env.now
             log.info(
                 f"[{self.env.now:.1f}] [TramPair {self.route_num}] "
@@ -180,6 +186,8 @@ class TramPair:
                     f"опоздание на {-wait:.1f} мин — выпуск сразу"
                 )
 
+            tram.target_release_time = next_dispatch
+            tram.actual_release_time = self.env.now
             self.last_fwd_dispatch_time = self.env.now
             log.info(
                 f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
@@ -214,12 +222,34 @@ class MultiRouteSimulation:
         # ── Загрузка экономических нормативов из Excel ─────────────────────────
         self.route_economics = load_route_economics()
 
+        # ── Загрузка конфигурации штрафов ──────────────────────────────────────
+        import json
+        penalties_path = "configs/penalties_config.json"
+        if os.path.exists(penalties_path):
+            try:
+                with open(penalties_path, "r", encoding="utf-8") as f:
+                    self.penalties_config = json.load(f)
+            except Exception as e:
+                log.warning(f"Ошибка чтения {penalties_path}, используем дефолтные штрафы: {e}")
+                self.penalties_config = self._default_penalties_dict()
+        else:
+            self.penalties_config = self._default_penalties_dict()
+            try:
+                os.makedirs(os.path.dirname(penalties_path), exist_ok=True)
+                with open(penalties_path, "w", encoding="utf-8") as f:
+                    json.dump(self.penalties_config, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                log.warning(f"Не удалось записать дефолтный конфиг штрафов: {e}")
+
         items = list(route_pairs.items())
         DEFAULT_PER_ROUTE = 30
 
         for i, (route_num, (fwd_file, bwd_file)) in enumerate(items):
             fwd_cfg = RouteConfig.from_json(fwd_file)
             bwd_cfg = RouteConfig.from_json(bwd_file)
+
+            fwd_cfg.penalties_config = self.penalties_config
+            bwd_cfg.penalties_config = self.penalties_config
 
             # Инжектим экономические нормативы в конфиг маршрута
             econ = self.route_economics.get(route_num)
@@ -288,6 +318,16 @@ class MultiRouteSimulation:
         return cls(route_pairs, tram_counts=tram_counts,
                    run_dir=run_dir, silent=True, lightweight_mode=True)
 
+    def _default_penalties_dict(self) -> dict:
+        return {
+            "release_early_tolerance_min": 1.0,
+            "release_late_tolerance_min": 5.0,
+            "midpoint_tolerance_min": 5.0,
+            "failed_trips_threshold_pct": 15.0,
+            "release_daily_penalty_rub": 1000.0,
+            "midpoint_daily_penalty_rub": 1000.0
+        }
+
     # ── Регистрация остановок ─────────────────────────────────────────────────
 
     def _register_stops(self, cfg: RouteConfig):
@@ -340,9 +380,10 @@ class MultiRouteSimulation:
             with open(csv_path, "w", encoding="utf-8", newline="") as f:
                 writer = csv.writer(f, delimiter=";")
                 writer.writerow([
-                    "Объект", "Пассажиры (расчет)", "Трамвай-км", "Рейсы", 
+                    "Объект", "Пассажиры (расчет)", "Трамвай-км", "Рейсы", "Трамваев",
                     "Совокупный Доход", "Пассажирский Доход", "Контрактный Доход", 
-                    "OpEx", "Маржинальная Прибыль", "Прибыль/км", "ROS %", "MAE интервалов"
+                    "OpEx", "Маржинальная Прибыль", "Прибыль/км", "ROS %", "MAE интервалов",
+                    "Невыполненные рейсы (выпуск)", "Рейсы с откл. середина", "Потерянный контракт", "Штрафы"
                 ])
                 
                 for pair in self.pairs:
@@ -351,27 +392,30 @@ class MultiRouteSimulation:
                         rs = stats["routes"].get(rid)
                         if rs:
                             writer.writerow([
-                                rid, f"{rs['passengers_estimated']:.0f}", f"{rs['tram_km']:.1f}", str(rs['total_trips']),
+                                rid, f"{rs['passengers_estimated']:.0f}", f"{rs['tram_km']:.1f}", str(rs['total_trips']), str(rs['trams_count']),
                                 f"{rs['revenue']:.0f}", f"{rs['passenger_revenue']:.0f}", f"{rs['contract_revenue']:.0f}",
                                 f"{rs['opex']:.0f}", f"{rs['marginal_profit']:.0f}", f"{rs['profit_per_km']:.2f}",
-                                f"{rs['ros_pct']:.1f}", f"{rs['headway_mae_min']:.2f}"
+                                f"{rs['ros_pct']:.1f}", f"{rs['headway_mae_min']:.2f}",
+                                str(rs.get('failed_release_trips', 0)), str(rs.get('failed_midpoint_trips', 0)), f"{rs.get('lost_contract_revenue', 0.0):.0f}", "0"
                             ])
                             
                     rt = stats["route_totals"].get(pair.route_num)
                     if rt:
                         writer.writerow([
-                            f"{pair.route_num}_общий", f"{rt['passengers_estimated']:.0f}", f"{rt['tram_km']:.1f}", str(rt['total_trips']),
+                            f"{pair.route_num}_общий", f"{rt['passengers_estimated']:.0f}", f"{rt['tram_km']:.1f}", str(rt['total_trips']), str(rt['trams_count']),
                             f"{rt['revenue']:.0f}", f"{rt['passenger_revenue']:.0f}", f"{rt['contract_revenue']:.0f}",
                             f"{rt['opex']:.0f}", f"{rt['marginal_profit']:.0f}", f"{rt['profit_per_km']:.2f}",
-                            f"{rt['ros_pct']:.1f}", f"{rt['headway_mae_min']:.2f}"
+                            f"{rt['ros_pct']:.1f}", f"{rt['headway_mae_min']:.2f}",
+                            str(rt.get('failed_release_trips', 0)), str(rt.get('failed_midpoint_trips', 0)), f"{rt.get('lost_contract_revenue', 0.0):.0f}", f"{rt.get('total_penalties', 0.0):.0f}"
                         ])
                         
                 g = stats["global"]
                 writer.writerow([
-                    "Глобально", f"{g['total_passengers_est']:.0f}", f"{g['total_tram_km']:.1f}", str(g['total_trips']),
+                    "Глобально", f"{g['total_passengers_est']:.0f}", f"{g['total_tram_km']:.1f}", str(g['total_trips']), str(g['total_trams']),
                     f"{g['total_revenue']:.0f}", f"{g['total_passenger_revenue']:.0f}", f"{g['total_contract_revenue']:.0f}",
                     f"{g['opex']:.0f}", f"{g['marginal_profit']:.0f}", f"{g['profit_per_km']:.2f}",
-                    f"{g['ros_pct']:.1f}", f"{g['headway_mae_min']:.2f}"
+                    f"{g['ros_pct']:.1f}", f"{g['headway_mae_min']:.2f}",
+                    str(g.get('failed_release_trips', 0)), str(g.get('failed_midpoint_trips', 0)), f"{g.get('lost_contract_revenue', 0.0):.0f}", f"{g.get('total_penalties', 0.0):.0f}"
                 ])
 
             logs_dir = os.path.join(self.run_dir, "logs")
@@ -493,6 +537,7 @@ class MultiRouteSimulation:
                     "passengers_estimated":       route.stats.total_passengers_estimated,
                     "tram_km":                    r_km,
                     "total_trips":                r_trips,
+                    "trams_count":                len(pair.all_trams),
                     "revenue":                    r_rev,
                     "passenger_revenue":          r_pax_rev,
                     "contract_revenue":           r_cnt_rev,
@@ -501,6 +546,9 @@ class MultiRouteSimulation:
                     "marginal_profit":            marginal_profit,
                     "profit_per_km":              profit_per_km,
                     "ros_pct":                    ros,
+                    "failed_release_trips":       route.stats.failed_release_trips,
+                    "failed_midpoint_trips":      route.stats.failed_midpoint_trips,
+                    "lost_contract_revenue":      route.stats.lost_contract_revenue,
                 }
 
             # Затем рассчитываем агрегированную статистику по маршруту в целом
@@ -524,28 +572,67 @@ class MultiRouteSimulation:
             ]
             pair_mae = sum(pair_errors) / len(pair_errors) if pair_errors else 0.0
             
+            tot_failed_release = fwd_s["failed_release_trips"] + bwd_s["failed_release_trips"]
+            tot_failed_midpoint = fwd_s["failed_midpoint_trips"] + bwd_s["failed_midpoint_trips"]
+            tot_lost_contract = fwd_s["lost_contract_revenue"] + bwd_s["lost_contract_revenue"]
+            
+            # Daily penalties calculation
+            release_penalty = 0.0
+            midpoint_penalty = 0.0
+            
+            days = max(1.0, pair.fwd.config.simulation_hours / 24.0)
+            p_config = self.penalties_config
+            pct_threshold = p_config.get("failed_trips_threshold_pct", 15.0) / 100.0
+            
+            if tot_trips > 0:
+                pct_release = tot_failed_release / tot_trips
+                if pct_release > pct_threshold:
+                    release_penalty = p_config.get("release_daily_penalty_rub", 1000.0) * days
+                
+                pct_midpoint = tot_failed_midpoint / tot_trips
+                if pct_midpoint > pct_threshold:
+                    midpoint_penalty = p_config.get("midpoint_daily_penalty_rub", 1000.0) * days
+            
+            tot_penalties = release_penalty + midpoint_penalty
+            
             route_totals[pair.route_num] = {
                 "passengers_estimated":       tot_pax,
                 "tram_km":                    tot_km,
                 "total_trips":                tot_trips,
+                "trams_count":                len(pair.all_trams),
                 "revenue":                    tot_rev,
                 "passenger_revenue":          tot_pax_rev,
                 "contract_revenue":           tot_cnt_rev,
                 "headway_mae_min":            pair_mae,
                 "opex":                       tot_opex,
-                "marginal_profit":            tot_margin,
-                "profit_per_km":              tot_margin / tot_km if tot_km > 0 else 0.0,
-                "ros_pct":                    (tot_margin / tot_rev * 100) if tot_rev > 0 else 0.0,
+                "release_penalty":            release_penalty,
+                "midpoint_penalty":           midpoint_penalty,
+                "total_penalties":            tot_penalties,
+                "marginal_profit":            tot_margin - tot_penalties,
+                "profit_per_km":              (tot_margin - tot_penalties) / tot_km if tot_km > 0 else 0.0,
+                "ros_pct":                    ((tot_margin - tot_penalties) / tot_rev * 100) if tot_rev > 0 else 0.0,
+                "failed_release_trips":       tot_failed_release,
+                "failed_midpoint_trips":      tot_failed_midpoint,
+                "lost_contract_revenue":      tot_lost_contract,
             }
 
         # ── Глобальные агрегаты ────────────────────────────────────────────
         g_total_trips = sum(rs["total_trips"] for rs in routes_stats.values())
         g_opex = sum(rs["opex"] for rs in routes_stats.values())
-        g_marginal_profit = total_revenue - g_opex
-        g_profit_per_km = g_marginal_profit / total_km if total_km > 0 else 0.0
-        g_ros = (g_marginal_profit / total_revenue * 100) if total_revenue > 0 else 0.0
         g_passenger_revenue = sum(rs["passenger_revenue"] for rs in routes_stats.values())
         g_contract_revenue = sum(rs["contract_revenue"] for rs in routes_stats.values())
+        g_total_trams = sum(len(p.all_trams) for p in self.pairs)
+        
+        g_failed_release = sum(rt["failed_release_trips"] for rt in route_totals.values())
+        g_failed_midpoint = sum(rt["failed_midpoint_trips"] for rt in route_totals.values())
+        g_lost_contract = sum(rt["lost_contract_revenue"] for rt in route_totals.values())
+        g_release_penalty = sum(rt["release_penalty"] for rt in route_totals.values())
+        g_midpoint_penalty = sum(rt["midpoint_penalty"] for rt in route_totals.values())
+        g_total_penalties = g_release_penalty + g_midpoint_penalty
+        
+        g_marginal_profit = total_revenue - g_opex - g_total_penalties
+        g_profit_per_km = g_marginal_profit / total_km if total_km > 0 else 0.0
+        g_ros = (g_marginal_profit / total_revenue * 100) if total_revenue > 0 else 0.0
 
         return {
             "routes": routes_stats,
@@ -560,9 +647,16 @@ class MultiRouteSimulation:
                 "total_passengers_est": total_pax_est,
                 "unique_stops":         len(self.shared_stops),
                 "opex":                 g_opex,
+                "release_penalty":      g_release_penalty,
+                "midpoint_penalty":     g_midpoint_penalty,
+                "total_penalties":      g_total_penalties,
                 "marginal_profit":      g_marginal_profit,
                 "profit_per_km":        g_profit_per_km,
                 "ros_pct":              g_ros,
+                "total_trams":          g_total_trams,
+                "failed_release_trips": g_failed_release,
+                "failed_midpoint_trips": g_failed_midpoint,
+                "lost_contract_revenue": g_lost_contract,
             },
         }
 
@@ -581,6 +675,7 @@ class MultiRouteSimulation:
                     lines.append(f"  • Пассажиры (расчёт):  {rs['passengers_estimated']:.0f}")
                     lines.append(f"  • Трамвай-км:          {rs['tram_km']:.1f}")
                     lines.append(f"  • Рейсов:             {rs['total_trips']}")
+                    lines.append(f"  • Трамваев на маршруте:  {rs['trams_count']}")
                     lines.append(f"  • Совокупный Доход:    {rs['revenue']:.0f} руб.")
                     lines.append(f"    - Пассажиры:         {rs['passenger_revenue']:.0f} руб.")
                     lines.append(f"    - Контракт:          {rs['contract_revenue']:.0f} руб.")
@@ -596,10 +691,17 @@ class MultiRouteSimulation:
                 lines.append(f"  • Пассажиры (расчёт):  {rt['passengers_estimated']:.0f}")
                 lines.append(f"  • Трамвай-км:          {rt['tram_km']:.1f}")
                 lines.append(f"  • Рейсов:             {rt['total_trips']}")
+                lines.append(f"  • Невыполненных рейсов (выпуск): {rt['failed_release_trips']} (потери контракта: {rt['lost_contract_revenue']:.0f} руб.)")
+                lines.append(f"  • Рейсов с отклонением на серединной: {rt['failed_midpoint_trips']}")
+                lines.append(f"  • Трамваев на маршруте:  {rt['trams_count']}")
                 lines.append(f"  • Совокупный Доход:    {rt['revenue']:.0f} руб.")
                 lines.append(f"    - Пассажиры:         {rt['passenger_revenue']:.0f} руб.")
                 lines.append(f"    - Контракт:          {rt['contract_revenue']:.0f} руб.")
                 lines.append(f"  • OpEx:                {rt['opex']:.0f} руб.")
+                if rt.get('total_penalties', 0) > 0:
+                    lines.append(f"  • Штрафы за несоблюдение выпуска: {rt['release_penalty']:.0f} руб.")
+                    lines.append(f"  • Штрафы за серединные отклонения: {rt['midpoint_penalty']:.0f} руб.")
+                    lines.append(f"  • Всего штрафов:      {rt['total_penalties']:.0f} руб.")
                 lines.append(f"  • Марж. прибыль:      {rt['marginal_profit']:.0f} руб.")
                 lines.append(f"  • Прибыль/км:          {rt['profit_per_km']:.2f} руб.")
                 lines.append(f"  • ROS:                 {rt['ros_pct']:.1f}%")
@@ -609,10 +711,17 @@ class MultiRouteSimulation:
         lines.append(f"\nГлобально:")
         lines.append(f"  • Всего трамвай-км:   {g['total_tram_km']:.1f}")
         lines.append(f"  • Всего рейсов:      {g['total_trips']}")
+        lines.append(f"  • Всего невыполненных рейсов: {g['failed_release_trips']} (всего потери контракта: {g['lost_contract_revenue']:.0f} руб.)")
+        lines.append(f"  • Всего рейсов с отклонением на серединной: {g['failed_midpoint_trips']}")
+        lines.append(f"  • Всего трамваев:      {g['total_trams']}")
         lines.append(f"  • Всего доход:       {g['total_revenue']:.0f} руб.")
         lines.append(f"    - Пассажиры:       {g['total_passenger_revenue']:.0f} руб.")
         lines.append(f"    - Контракт:        {g['total_contract_revenue']:.0f} руб.")
         lines.append(f"  • Всего OpEx:        {g['opex']:.0f} руб.")
+        if g.get('total_penalties', 0) > 0:
+            lines.append(f"  • Всего штрафов за выпуск: {g['release_penalty']:.0f} руб.")
+            lines.append(f"  • Всего штрафов за серединные: {g['midpoint_penalty']:.0f} руб.")
+            lines.append(f"  • Всего штрафов:      {g['total_penalties']:.0f} руб.")
         lines.append(f"  • Марж. прибыль:     {g['marginal_profit']:.0f} руб.")
         lines.append(f"  • Прибыль/км:        {g['profit_per_km']:.2f} руб.")
         lines.append(f"  • ROS:               {g['ros_pct']:.1f}%")

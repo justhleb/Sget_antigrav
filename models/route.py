@@ -40,6 +40,9 @@ class RouteStats:
     total_passengers_estimated: float = 0.0  # расчетные пассажиры (пробег * pax_per_km)
     total_trips: int = 0                # количество завершённых рейсов
     utilization_deviations: List[float] = field(default_factory=list)
+    failed_release_trips: int = 0
+    failed_midpoint_trips: int = 0
+    lost_contract_revenue: float = 0.0
 
 
 
@@ -63,6 +66,7 @@ class RouteConfig:
     target_utilization: float = DEFAULT_TARGET_UTIL
     random_seed: Optional[int] = None
     target_intervals: Optional[Dict[str, Dict[str, int]]] = None
+    penalties_config: dict = field(default_factory=dict)
     # ── Экономические нормативы (из Excel) ────────────────────────────────
     revenue_per_km: float = 0.0       # руб. средний доход на 1 км пути
     passengers_per_km: float = 0.0    # чел. среднее кол-во пасс. на 1 км
@@ -229,6 +233,20 @@ class Route:
             tram.stats.total_trips += 1
             self.stats.total_trips += 1
             tram.direction = "forward" if "fwd" in cfg.route_id else "backward"
+            tram.current_trip_midpoint_failed = False
+
+            # Check Type 1: Release failure (only for forward route releases)
+            release_failed = False
+            is_fwd = "fwd" in cfg.route_id
+            if is_fwd:
+                target_rel = getattr(tram, "target_release_time", None)
+                actual_rel = getattr(tram, "actual_release_time", None)
+                if target_rel is not None and actual_rel is not None:
+                    deviation = actual_rel - target_rel
+                    early_tol = cfg.penalties_config.get("release_early_tolerance_min", 1.0)
+                    late_tol = cfg.penalties_config.get("release_late_tolerance_min", 5.0)
+                    if deviation < -early_tol or deviation > late_tol:
+                        release_failed = True
 
             trip_km = 0.0  # километраж за данный рейс
 
@@ -250,16 +268,27 @@ class Route:
             # ── Макро-экономическая оценка рейса ──────────────────────────────
             trip_passenger_revenue = trip_km * cfg.revenue_per_km
             trip_contract_revenue  = trip_km * cfg.contract_revenue_per_km
-            trip_revenue        = trip_passenger_revenue + trip_contract_revenue
+
+            if release_failed:
+                self.stats.failed_release_trips += 1
+                self.stats.lost_contract_revenue += trip_contract_revenue
+                actual_contract_revenue = 0.0
+            else:
+                actual_contract_revenue = trip_contract_revenue
+
+            trip_revenue        = trip_passenger_revenue + actual_contract_revenue
             trip_passengers_est = trip_km * cfg.passengers_per_km
 
             self.stats.total_passenger_revenue    += trip_passenger_revenue
-            self.stats.total_contract_revenue     += trip_contract_revenue
+            self.stats.total_contract_revenue     += actual_contract_revenue
             self.stats.total_revenue              += trip_revenue
             self.stats.total_passengers_estimated  += trip_passengers_est
             self.stats.total_passengers_served     += int(trip_passengers_est)
 
             tram.stats.passengers_served += int(trip_passengers_est)
+
+            if getattr(tram, "current_trip_midpoint_failed", False):
+                self.stats.failed_midpoint_trips += 1
 
             log.info(
                 f"[{self.env.now:.1f}] Маршрут {cfg.route_id}: "
@@ -320,6 +349,13 @@ class Route:
         if prev_departure is not None and target_headway > 0:
             actual_headway = departure_time - prev_departure
             headway_error = abs(actual_headway - target_headway)
+
+        # Check Type 2: Midpoint stop interval deviation
+        is_midpoint = (stop_index - 1 == len(self.config.stop_ids) // 2)
+        if is_midpoint and prev_departure is not None and target_headway > 0:
+            mid_tol = self.config.penalties_config.get("midpoint_tolerance_min", 5.0)
+            if headway_error > mid_tol:
+                tram.current_trip_midpoint_failed = True
 
         stop.last_tram_departure_time[route_id] = departure_time
 

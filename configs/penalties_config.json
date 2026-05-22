@@ -1,0 +1,8 @@
+{
+  "release_early_tolerance_min": 1.0,
+  "release_late_tolerance_min": 5.0,
+  "midpoint_tolerance_min": 5.0,
+  "failed_trips_threshold_pct": 15.0,
+  "release_daily_penalty_rub": 1000.0,
+  "midpoint_daily_penalty_rub": 1000.0
+}
