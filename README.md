@@ -20,7 +20,7 @@
 
 Система осуществляет **макро-экономическую оценку эффективности**, основываясь на расчётах реальной статистики доходов.
 
-### Основные задачи модели:
+### Основные задачи модели
 
 - Обработка исторических данных из многоуровневых Excel-отчётов о доходах (revenue) и пассажиропотоке
 - Моделирование движения трамваев с непрерывным выпуском и отслеживанием отклонений от целевых интервалов (headway)
@@ -37,7 +37,7 @@
 
 ## 2. АРХИТЕКТУРА ПРОЕКТА
 
-### Структура файлов:
+### Структура файлов
 
 ```
 project/
@@ -110,7 +110,7 @@ project/
 
 В начале дня трамваи выпускаются из депо строго с целевым интервалом текущего часа:
 
-$$\text{interval} = \text{target\_interval}(\text{hour})$$
+$$\text{Interval} = \text{Target Interval}(\text{Hour})$$
 
 Например, для маршрута 20 до 07:00 целевой интервал 23 мин — значит трамваи выходят на линию с шагом 23 минуты, пока весь парк не будет на маршруте.
 
@@ -118,12 +118,12 @@ $$\text{interval} = \text{target\_interval}(\text{hour})$$
 
 После завершения круга (fwd → разворот → bwd → отдых 15 мин) трамвай не выпускается сразу, а ожидает до момента, когда с последнего выпуска пройдёт `target_interval` минут:
 
-$$\text{next\_dispatch} = \text{last\_dispatch\_time} + \text{target\_interval}(\text{now})$$
+$$\text{Next Dispatch} = \text{Last Dispatch Time} + \text{Target Interval}(\text{Now})$$
 
-* Если трамвай **готов раньше** `next_dispatch` — он ждёт в депо до нужного момента, поддерживая идеальный интервал.
-* Если трамвай **опоздал** (вернулся после `next_dispatch`) — выпускается сразу, чтобы минимизировать разрыв.
+- Если трамвай **готов раньше** `next_dispatch` — он ждёт в депо до нужного момента, поддерживая идеальный интервал.
+- Если трамвай **опоздал** (вернулся после `next_dispatch`) — выпускается сразу, чтобы минимизировать разрыв.
 
-При отсутствии данных о целевых интервалах используется fallback-расчёт: $\text{interval} = \text{round\_trip} / N$.
+При отсутствии данных о целевых интервалах используется fallback-расчёт: $\text{Interval} = \text{Round Trip} / N$.
 
 ### 3.4 Макро-Экономическая Модель (Доходы, Расходы и Рентабельность)
 
@@ -131,26 +131,26 @@ $$\text{next\_dispatch} = \text{last\_dispatch\_time} + \text{target\_interval}(
 
 1. **Выручка за рейс** складывается из дохода от пассажиров (выручка из Excel-отчетов по пробегу) и дохода от исполнения контракта (фиксированный тариф за каждый пройденный километр):
    $$\text{Revenue}_{\text{trip}} = \text{Revenue}_{\text{passenger}} + \text{Revenue}_{\text{contract}}$$
-   * *Доход от пассажиров*:
-     $$\text{Revenue}_{\text{passenger}} = \text{run\_km} \times \text{revenue\_per\_km}$$
-   * *Доход от контракта* (фиксированный тариф `contract_revenue_per_km` = 529.5 руб./км):
-     $$\text{Revenue}_{\text{contract}} = \text{run\_km} \times \text{contract\_revenue\_per\_km}$$
+   - *Доход от пассажиров*:
+     $$\text{Revenue}_{\text{passenger}} = \text{Run KM} \times \text{Revenue Per KM}$$
+   - *Доход от контракта* (фиксированный тариф `contract_revenue_per_km` = 529.5 руб./км):
+     $$\text{Revenue}_{\text{contract}} = \text{Run KM} \times \text{Contract Revenue Per KM}$$
 2. **Пассажиропоток** оценивается макро-методом на основании пробега и средних исторических данных:
-   $$\text{Passengers\_est}_{\text{trip}} = \text{run\_km} \times \text{passengers\_per\_km}$$
+   $$\text{Passengers Est}_{\text{trip}} = \text{Run KM} \times \text{Passengers Per KM}$$
 3. **Операционные расходы (OpEx)** рассчитываются на основе пробежных и рейсовых нормативов, заложенных в конфигурационных JSON-файлах:
-   * *Пробежные расходы (руб/км)*: энергия (`energy_per_km`), ТОиР (`maintenance_per_km` — равен 0, так как весь ТОиР перенесён в рейсовую часть) и амортизация (`depreciation_per_km`).
-     $$\text{cost\_per\_km} = \text{energy\_per\_km} + \text{maintenance\_per\_km} + \text{depreciation\_per\_km}$$
-   * *Рейсовые расходы (руб/рейс)*: ФОТ водителя (`payroll_per_trip`) и фиксированный ТОиР (`maintenance_fixed_per_trip`).
-     $$\text{cost\_per\_trip} = \text{payroll\_per\_trip} + \text{maintenance\_fixed\_per\_trip}$$
-   * *Итоговый OpEx рейса*:
-     $$\text{OpEx}_{\text{trip}} = (\text{run\_km} \times \text{cost\_per\_km}) + \text{cost\_per\_trip}$$
+   - *Пробежные расходы (руб/км)*: энергия (`energy_per_km`), ТОиР (`maintenance_per_km` — равен 0, так как весь ТОиР перенесён в рейсовую часть) и амортизация (`depreciation_per_km`).
+     $$\text{Cost Per KM} = \text{Energy Per KM} + \text{Maintenance Per KM} + \text{Depreciation Per KM}$$
+   - *Рейсовые расходы (руб/рейс)*: ФОТ водителя (`payroll_per_trip`) и фиксированный ТОиР (`maintenance_fixed_per_trip`).
+     $$\text{Cost Per Trip} = \text{Payroll Per Trip} + \text{Maintenance Fixed Per Trip}$$
+   - *Итоговый OpEx рейса*:
+     $$\text{OpEx}_{\text{trip}} = (\text{Run KM} \times \text{Cost Per KM}) + \text{Cost Per Trip}$$
 4. **Финансовый результат** (считается по совокупному доходу):
-   * *Маржинальная прибыль*:
-     $$\text{Marginal\_Profit} = \text{Revenue} - \text{OpEx}$$
-   * *Прибыль на километр*:
-     $$\text{Profit\_per\_km} = \frac{\text{Marginal\_Profit}}{\text{run\_km}}$$
-   * *Рентабельность продаж (ROS, %)*:
-     $$\text{ROS} = \frac{\text{Marginal\_Profit}}{\text{Revenue}} \times 100\%$$
+   - *Маржинальная прибыль*:
+     $$\text{Marginal Profit} = \text{Revenue} - \text{OpEx}$$
+   - *Прибыль на километр*:
+     $$\text{Profit Per KM} = \frac{\text{Marginal Profit}}{\text{Run KM}}$$
+   - *Рентабельность продаж (ROS, %)*:
+     $$\text{ROS} = \frac{\text{Marginal Profit}}{\text{Revenue}} \times 100\%$$
 5. Модуль `excel_parser.py` автоматически считывает `summary_reports_*.xlsx` для получения средних метрик эффективности конкретного подвижного состава и формирует нормативы перед стартом.
 6. **Исправление расчёта дистанций**: Длина маршрута рассчитывается последовательным суммированием сегментов из `distances_list` для обхода багов с дублированием идентификаторов остановок на некоторых маршрутах.
 
@@ -164,11 +164,12 @@ $$\text{next\_dispatch} = \text{last\_dispatch\_time} + \text{target\_interval}(
 
 ## 3.6 Расчёт времени движения
 
-Время проезда между остановками зависит от пройденной дистанции, базовой скорости трамваев (фиксирована на уровне **17 км/ч** для всех маршрутов) и коэффициента загруженности дорог в текущий час, загружаемого централизованно из файла [road_load.json](file:///c:/Users/keyne/Desktop/Sget_antigrav/configs/road_load.json).
+Время проезда между остановками зависит от пройденной дистанции, базовой скорости трамваев (фиксирована на уровне **17 км/ч** для всех маршрутов) и коэффициента загруженности дорог в текущий час, загружаемого централизованно из файла road_load.json
 
 Скорость трамвая в конкретный час рассчитывается по формуле:
 $$\text{speed} = \text{flow\_speed} \times \text{load}$$
 Где:
+
 - $\text{flow\_speed}$ — базовая скорость (17 км/ч).
 - $\text{load}$ — коэффициент загруженности дорог в данный час (например, $0.65$ для 17:00, снижающий скорость до $11.05$ км/ч).
 К рассчитанной скорости применяется случайная вариация в пределах $\pm 5\%$, а также накладывается ограничение снизу в $5$ км/ч.
@@ -190,10 +191,11 @@ $$\text{speed} = \text{flow\_speed} \times \text{load}$$
    - Если отклонение фактического интервала движения от целевого (ошибка headway) превышает значение `midpoint_tolerance_min` (по умолчанию 5.0 минут), рейс помечается как выполненный с отклонением на серединной остановке.
    - Если доля таких рейсов по всему маршруту за сутки превышает порог `failed_trips_threshold_pct` (15%), накладывается суточный штраф `midpoint_daily_penalty_rub` (1000 рублей).
 
-#### Влияние штрафов на финансовые KPI:
+#### Влияние штрафов на финансовые KPI
+
 Сумма всех наложенных суточных штрафов вычитается из маржинальной прибыли (`Marginal_Profit`) и, соответственно, снижает удельную прибыль на километр (`Profit_per_km`) и общую рентабельность (`ROS %`):
-$$\text{Marginal\_Profit} = \text{Revenue} - \text{OpEx} - \text{Total\_Penalties}$$
-$$\text{ROS} = \frac{\text{Marginal\_Profit}}{\text{Revenue}} \times 100\%$$
+$$\text{Marginal Profit} = \text{Revenue} - \text{OpEx} - \text{Total Penalties}$$
+$$\text{ROS} = \frac{\text{Marginal Profit}}{\text{Revenue}} \times 100\%$$
 
 ---
 
@@ -256,6 +258,7 @@ CLI интерфейс для запуска симуляции в автоно�
 ### JSON-конфигурация маршрута
 
 Конфигурационные файлы `route_{id}_config.json` содержат следующие параметры:
+
 1. **Расходные параметры** для расчета OpEx:
    - `energy_per_km` — расходы на электроэнергию (руб/км пробега);
    - `maintenance_per_km` — переменные расходы на ТОиР (руб/км пробега, по умолчанию 0.0);
@@ -265,7 +268,7 @@ CLI интерфейс для запуска симуляции в автоно�
 2. **Форматирование массивов**: все числовые массивы (`stop_ids`, `distance`, `road_loads`, `bus_interval`) отформатированы **строго по 10 элементов (или пар) в ряд** для удобства визуального контроля.
 3. **Размер выпуска из конфигурации**: параметр `"tram_count"` используется для задания точного количества трамваев на каждом маршруте (например, 21 для маршрута 20, 16 для 48, 30 для 55). Если в CLI не указан параметр `--trams`, размер выпуска считывается динамически из конфигурационных файлов.
 
-#### Пример структуры `configs/route_20_fwd_config.json`:
+#### Пример структуры `configs/route_20_fwd_config.json`
 
 ```json
 {
