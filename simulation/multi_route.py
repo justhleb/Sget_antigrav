@@ -28,13 +28,14 @@ from models.tram import Tram
 from logger import TramLogger
 from visualization import TramVisualization
 from data_sensors.excel_parser import load_route_economics
+from constants import (
+    OUTPUT_DIR,
+    MIN_REST_TIME,
+    DEFAULT_STOP_DWELL_MIN,
+)
 
 log = logging.getLogger(__name__)
 results_log = logging.getLogger("simulation.results")
-
-OUTPUT_DIR    = "outputs"
-MIN_REST_TIME = 15.0
-DEFAULT_ROAD_LOAD_ESTIMATE = 0.4  # для оценки интервала начального выпуска
 
 
 class TramPair:
@@ -59,9 +60,10 @@ class TramPair:
         self.route_num = route_num
         self.env = env
 
-        self.pool     = simpy.Store(env)
-        self.fwd_done = simpy.Store(env)
-        self.bwd_done = simpy.Store(env)
+        self.pool      = simpy.Store(env)
+        self.fwd_done  = simpy.Store(env)
+        self.bwd_ready = simpy.Store(env)  # Промежуточный Store для развернутых трамваев
+        self.bwd_done  = simpy.Store(env)
 
         self.last_fwd_dispatch_time: float = 0.0  # время последнего выпуска на fwd
 
@@ -69,16 +71,16 @@ class TramPair:
                          available_trams=self.pool,
                          done_store=self.fwd_done)
         self.bwd = Route(bwd_config, env, shared_stops,
-                         available_trams=self.fwd_done,
+                         available_trams=self.bwd_ready,
                          done_store=self.bwd_done)
 
         self.all_trams: List[Tram] = []
-        self._spawn_trams(tram_count, tram_id_offset, fwd_config.tram_capacity, lightweight_mode)
+        self._spawn_trams(tram_count, tram_id_offset, lightweight_mode)
 
-    def _spawn_trams(self, count: int, id_offset: int, capacity: int, lightweight_mode: bool):
+    def _spawn_trams(self, count: int, id_offset: int, lightweight_mode: bool):
         for i in range(count):
             tram_id = id_offset + i + 1
-            tram = Tram(tram_id, self.route_num, capacity, lightweight_mode=lightweight_mode)
+            tram = Tram(tram_id, self.route_num, lightweight_mode=lightweight_mode)
             self.all_trams.append(tram)
         log.info(
             f"[TramPair {self.route_num}] Парк: {count} трамваев "
@@ -112,13 +114,11 @@ class TramPair:
         """Fallback: оценка интервала = время_кругорейса / N."""
         fwd_km = sum(self.fwd.config.distances_list) / 1000
         bwd_km = sum(self.bwd.config.distances_list) / 1000
-        eff_speed = max(
-            self.fwd.config.flow_speed * (1 - DEFAULT_ROAD_LOAD_ESTIMATE),
-            5.0,
-        )
+        load = self.fwd._get_road_load(self.env.now)
+        eff_speed = self.fwd.config.flow_speed * load
         travel_min = (fwd_km + bwd_km) / eff_speed * 60
         n_stops = len(self.fwd.config.stop_ids) + len(self.bwd.config.stop_ids)
-        dwell_min = n_stops * 1.0
+        dwell_min = n_stops * DEFAULT_STOP_DWELL_MIN
         turnaround = self.fwd.config.turnaround_time
         rest = max(self.fwd.config.min_rest_time, MIN_REST_TIME)
         round_trip = travel_min + dwell_min + turnaround + rest
@@ -146,54 +146,60 @@ class TramPair:
             yield self.pool.put(tram)
 
     def _turnaround_process(self):
-        """fwd завершён → разворот → трамвай доступен для bwd."""
-        turnaround = self.fwd.config.turnaround_time
+        """Слушает fwd_done и запускает параллельный процесс разворота для каждого трамвая."""
         while True:
             tram = yield self.fwd_done.get()
-            log.info(
-                f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
-                f"разворачивается ({turnaround} мин)"
-            )
-            yield self.env.timeout(turnaround)
-            yield self.fwd_done.put(tram)
+            self.env.process(self._individual_turnaround(tram))
+
+    def _individual_turnaround(self, tram: Tram):
+        turnaround = self.fwd.config.turnaround_time
+        log.info(
+            f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
+            f"разворачивается ({turnaround} мин)"
+        )
+        yield self.env.timeout(turnaround)
+        yield self.bwd_ready.put(tram)
 
     def _rest_process(self):
-        """bwd завершён → отдых → ожидание целевого интервала → депо."""
-        rest_time = max(self.fwd.config.min_rest_time, MIN_REST_TIME)
+        """Слушает bwd_done и запускает параллельный процесс отдыха для каждого трамвая."""
         while True:
             tram = yield self.bwd_done.get()
+            self.env.process(self._individual_rest_and_release(tram))
+
+    def _individual_rest_and_release(self, tram: Tram):
+        rest_time = max(self.fwd.config.min_rest_time, MIN_REST_TIME)
+        log.info(
+            f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
+            f"в депо, отдых {rest_time:.0f} мин"
+        )
+        yield self.env.timeout(rest_time)
+
+        # Резервируем следующий слот выпуска
+        target_interval = self._get_target_interval(self.env.now)
+        next_dispatch = max(self.last_fwd_dispatch_time + target_interval, self.env.now)
+        self.last_fwd_dispatch_time = next_dispatch
+
+        wait = next_dispatch - self.env.now
+        if wait > 0:
             log.info(
                 f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
-                f"в депо, отдых {rest_time:.0f} мин"
+                f"ожидает {wait:.1f} мин до целевого интервала "
+                f"({target_interval:.0f} мин)"
             )
-            yield self.env.timeout(rest_time)
-
-            # Ждём до целевого интервала с момента последнего выпуска
-            target_interval = self._get_target_interval(self.env.now)
-            next_dispatch = self.last_fwd_dispatch_time + target_interval
-            wait = next_dispatch - self.env.now
-
-            if wait > 0:
-                log.info(
-                    f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
-                    f"ожидает {wait:.1f} мин до целевого интервала "
-                    f"({target_interval:.0f} мин)"
-                )
-                yield self.env.timeout(wait)
-            else:
-                log.info(
-                    f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
-                    f"опоздание на {-wait:.1f} мин — выпуск сразу"
-                )
-
-            tram.target_release_time = next_dispatch
-            tram.actual_release_time = self.env.now
-            self.last_fwd_dispatch_time = self.env.now
+            yield self.env.timeout(wait)
+        else:
             log.info(
                 f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
-                f"выпущен на линию"
+                f"опоздание на {-wait:.1f} мин — выпуск сразу"
             )
-            yield self.pool.put(tram)
+
+        tram.target_release_time = next_dispatch
+        tram.actual_release_time = self.env.now
+        log.info(
+            f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
+            f"выпущен на линию"
+        )
+        yield self.pool.put(tram)
 
 
 class MultiRouteSimulation:
@@ -242,7 +248,16 @@ class MultiRouteSimulation:
                 log.warning(f"Не удалось записать дефолтный конфиг штрафов: {e}")
 
         items = list(route_pairs.items())
-        DEFAULT_PER_ROUTE = 30
+
+        if tram_counts is None:
+            tram_counts = []
+            for route_num, (fwd_file, bwd_file) in items:
+                fwd_cfg_temp = RouteConfig.from_json(fwd_file)
+                if fwd_cfg_temp.tram_count is None:
+                    raise ValueError(
+                        f"В конфигурационном файле {fwd_file} отсутствует параметр 'tram_count'!"
+                    )
+                tram_counts.append(fwd_cfg_temp.tram_count)
 
         for i, (route_num, (fwd_file, bwd_file)) in enumerate(items):
             fwd_cfg = RouteConfig.from_json(fwd_file)
@@ -272,8 +287,8 @@ class MultiRouteSimulation:
             self._register_stops(fwd_cfg)
             self._register_stops(bwd_cfg)
 
-            count  = tram_counts[i] if tram_counts else DEFAULT_PER_ROUTE
-            offset = sum(tram_counts[:i]) if tram_counts else i * DEFAULT_PER_ROUTE
+            count  = tram_counts[i]
+            offset = sum(tram_counts[:i])
 
             pair = TramPair(
                 route_num=route_num,
@@ -287,7 +302,7 @@ class MultiRouteSimulation:
             )
             self.pairs.append(pair)
 
-        total = sum(tram_counts) if tram_counts else len(items) * DEFAULT_PER_ROUTE
+        total = sum(tram_counts)
         log.info(
             f"MultiRouteSimulation: {len(self.pairs)} маршрута, "
             f"{total} трамваев всего, "
@@ -383,7 +398,8 @@ class MultiRouteSimulation:
                     "Объект", "Пассажиры (расчет)", "Трамвай-км", "Рейсы", "Трамваев",
                     "Совокупный Доход", "Пассажирский Доход", "Контрактный Доход", 
                     "OpEx", "Маржинальная Прибыль", "Прибыль/км", "ROS %", "MAE интервалов",
-                    "Невыполненные рейсы (выпуск)", "Рейсы с откл. середина", "Потерянный контракт", "Штрафы"
+                    "Невыполненные рейсы (выпуск)", "Рейсы с откл. середина", "Потерянный контракт", "Штрафы",
+                    "Успешные рейсы", "Контрактные рейсы", "% Выполнения контракта"
                 ])
                 
                 for pair in self.pairs:
@@ -396,7 +412,8 @@ class MultiRouteSimulation:
                                 f"{rs['revenue']:.0f}", f"{rs['passenger_revenue']:.0f}", f"{rs['contract_revenue']:.0f}",
                                 f"{rs['opex']:.0f}", f"{rs['marginal_profit']:.0f}", f"{rs['profit_per_km']:.2f}",
                                 f"{rs['ros_pct']:.1f}", f"{rs['headway_mae_min']:.2f}",
-                                str(rs.get('failed_release_trips', 0)), str(rs.get('failed_midpoint_trips', 0)), f"{rs.get('lost_contract_revenue', 0.0):.0f}", "0"
+                                str(rs.get('failed_release_trips', 0)), str(rs.get('failed_midpoint_trips', 0)), f"{rs.get('lost_contract_revenue', 0.0):.0f}", "0",
+                                str(rs['total_trips'] - rs.get('failed_release_trips', 0)), "0", "0.0"
                             ])
                             
                     rt = stats["route_totals"].get(pair.route_num)
@@ -406,7 +423,8 @@ class MultiRouteSimulation:
                             f"{rt['revenue']:.0f}", f"{rt['passenger_revenue']:.0f}", f"{rt['contract_revenue']:.0f}",
                             f"{rt['opex']:.0f}", f"{rt['marginal_profit']:.0f}", f"{rt['profit_per_km']:.2f}",
                             f"{rt['ros_pct']:.1f}", f"{rt['headway_mae_min']:.2f}",
-                            str(rt.get('failed_release_trips', 0)), str(rt.get('failed_midpoint_trips', 0)), f"{rt.get('lost_contract_revenue', 0.0):.0f}", f"{rt.get('total_penalties', 0.0):.0f}"
+                            str(rt.get('failed_release_trips', 0)), str(rt.get('failed_midpoint_trips', 0)), f"{rt.get('lost_contract_revenue', 0.0):.0f}", f"{rt.get('total_penalties', 0.0):.0f}",
+                            str(rt['successful_trips']), str(rt.get('contract_trips', 0)), f"{rt.get('contract_completion_pct', 0.0):.1f}"
                         ])
                         
                 g = stats["global"]
@@ -415,7 +433,8 @@ class MultiRouteSimulation:
                     f"{g['total_revenue']:.0f}", f"{g['total_passenger_revenue']:.0f}", f"{g['total_contract_revenue']:.0f}",
                     f"{g['opex']:.0f}", f"{g['marginal_profit']:.0f}", f"{g['profit_per_km']:.2f}",
                     f"{g['ros_pct']:.1f}", f"{g['headway_mae_min']:.2f}",
-                    str(g.get('failed_release_trips', 0)), str(g.get('failed_midpoint_trips', 0)), f"{g.get('lost_contract_revenue', 0.0):.0f}", f"{g.get('total_penalties', 0.0):.0f}"
+                    str(g.get('failed_release_trips', 0)), str(g.get('failed_midpoint_trips', 0)), f"{g.get('lost_contract_revenue', 0.0):.0f}", f"{g.get('total_penalties', 0.0):.0f}",
+                    str(g['successful_trips']), str(g.get('contract_trips', 0)), f"{g.get('contract_completion_pct', 0.0):.1f}"
                 ])
 
             logs_dir = os.path.join(self.run_dir, "logs")
@@ -595,6 +614,16 @@ class MultiRouteSimulation:
             
             tot_penalties = release_penalty + midpoint_penalty
             
+            # Контрактные данные
+            CONTRACT_TRIPS_MAP = {
+                "20": 225,
+                "48": 230,
+                "55": 303
+            }
+            contract_trips = CONTRACT_TRIPS_MAP.get(pair.route_num, 0)
+            successful_trips = tot_trips - tot_failed_release
+            contract_pct = (successful_trips / contract_trips * 100.0) if contract_trips > 0 else 0.0
+            
             route_totals[pair.route_num] = {
                 "passengers_estimated":       tot_pax,
                 "tram_km":                    tot_km,
@@ -614,6 +643,9 @@ class MultiRouteSimulation:
                 "failed_release_trips":       tot_failed_release,
                 "failed_midpoint_trips":      tot_failed_midpoint,
                 "lost_contract_revenue":      tot_lost_contract,
+                "contract_trips":             contract_trips,
+                "successful_trips":           successful_trips,
+                "contract_completion_pct":    contract_pct,
             }
 
         # ── Глобальные агрегаты ────────────────────────────────────────────
@@ -633,6 +665,10 @@ class MultiRouteSimulation:
         g_marginal_profit = total_revenue - g_opex - g_total_penalties
         g_profit_per_km = g_marginal_profit / total_km if total_km > 0 else 0.0
         g_ros = (g_marginal_profit / total_revenue * 100) if total_revenue > 0 else 0.0
+
+        g_contract_trips = sum(rt["contract_trips"] for rt in route_totals.values())
+        g_successful_trips = g_total_trips - g_failed_release
+        g_contract_pct = (g_successful_trips / g_contract_trips * 100.0) if g_contract_trips > 0 else 0.0
 
         return {
             "routes": routes_stats,
@@ -657,6 +693,9 @@ class MultiRouteSimulation:
                 "failed_release_trips": g_failed_release,
                 "failed_midpoint_trips": g_failed_midpoint,
                 "lost_contract_revenue": g_lost_contract,
+                "contract_trips":          g_contract_trips,
+                "successful_trips":        g_successful_trips,
+                "contract_completion_pct": g_contract_pct,
             },
         }
 
@@ -691,6 +730,9 @@ class MultiRouteSimulation:
                 lines.append(f"  • Пассажиры (расчёт):  {rt['passengers_estimated']:.0f}")
                 lines.append(f"  • Трамвай-км:          {rt['tram_km']:.1f}")
                 lines.append(f"  • Рейсов:             {rt['total_trips']}")
+                lines.append(f"  • Успешных рейсов:    {rt['successful_trips']}")
+                lines.append(f"  • Контрактных рейсов:  {rt['contract_trips']}")
+                lines.append(f"  • Процент выполнения контракта: {rt['contract_completion_pct']:.1f}%")
                 lines.append(f"  • Невыполненных рейсов (выпуск): {rt['failed_release_trips']} (потери контракта: {rt['lost_contract_revenue']:.0f} руб.)")
                 lines.append(f"  • Рейсов с отклонением на серединной: {rt['failed_midpoint_trips']}")
                 lines.append(f"  • Трамваев на маршруте:  {rt['trams_count']}")
@@ -711,6 +753,9 @@ class MultiRouteSimulation:
         lines.append(f"\nГлобально:")
         lines.append(f"  • Всего трамвай-км:   {g['total_tram_km']:.1f}")
         lines.append(f"  • Всего рейсов:      {g['total_trips']}")
+        lines.append(f"  • Всего успешных рейсов: {g['successful_trips']}")
+        lines.append(f"  • Всего контрактных рейсов: {g['contract_trips']}")
+        lines.append(f"  • Глобальный процент выполнения контракта: {g['contract_completion_pct']:.1f}%")
         lines.append(f"  • Всего невыполненных рейсов: {g['failed_release_trips']} (всего потери контракта: {g['lost_contract_revenue']:.0f} руб.)")
         lines.append(f"  • Всего рейсов с отклонением на серединной: {g['failed_midpoint_trips']}")
         lines.append(f"  • Всего трамваев:      {g['total_trams']}")

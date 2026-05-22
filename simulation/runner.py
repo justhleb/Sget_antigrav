@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from simulation.multi_route import MultiRouteSimulation
+from constants import DEFAULT_CONFIGS_DIR
 
 class SimulationConsoleFilter(logging.Filter):
     def filter(self, record):
@@ -33,8 +34,7 @@ root_logger.addHandler(console_handler)
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CONFIGS_DIR  = Path("configs")
-DEFAULT_TRAMS_PER_ROUTE = 30
+DEFAULT_CONFIGS_DIR_PATH = Path(DEFAULT_CONFIGS_DIR)
 
 
 def resolve_route_pairs(
@@ -89,13 +89,13 @@ def main():
         help=(
             "Кол-во трамваев на каждый маршрут в том же порядке что --routes.\n"
             "Можно указать одно число — применится ко всем маршрутам.\n"
-            f"По умолчанию: {DEFAULT_TRAMS_PER_ROUTE} на каждый маршрут.\n"
+            "По умолчанию количество трамваев берётся из конфигурационного файла маршрута.\n"
             "Примеры: --trams 30  или  --trams 25 30 35"
         )
     )
     parser.add_argument(
-        "--configs-dir", type=Path, default=DEFAULT_CONFIGS_DIR, metavar="DIR",
-        help=f"Папка с конфиг-файлами (по умолчанию: {DEFAULT_CONFIGS_DIR})"
+        "--configs-dir", type=Path, default=DEFAULT_CONFIGS_DIR_PATH, metavar="DIR",
+        help=f"Папка с конфиг-файлами (по умолчанию: {DEFAULT_CONFIGS_DIR_PATH})"
     )
     parser.add_argument("--no-plots", action="store_true", help="Не создавать графики")
     parser.add_argument("--no-logs",  action="store_true", help="Не сохранять CSV-логи")
@@ -110,7 +110,14 @@ def main():
 
     # Разбираем --trams
     if args.trams is None:
-        tram_counts = [DEFAULT_TRAMS_PER_ROUTE] * n_routes
+        tram_counts = []
+        for route_id, (fwd_path, bwd_path) in route_pairs.items():
+            from models.route import RouteConfig
+            fwd_cfg = RouteConfig.from_json(fwd_path)
+            if fwd_cfg.tram_count is None:
+                log.error(f"В конфигурационном файле {fwd_path} отсутствует параметр 'tram_count'!")
+                sys.exit(1)
+            tram_counts.append(fwd_cfg.tram_count)
     elif len(args.trams) == 1:
         tram_counts = args.trams * n_routes          # одно число → на все маршруты
     elif len(args.trams) == n_routes:

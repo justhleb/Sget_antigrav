@@ -16,16 +16,13 @@ import simpy
 
 from models.stop import Stop, StopEvent
 from models.tram import Tram
-from constants import DEFAULT_STOP_DWELL_MIN
+from constants import (
+    DEFAULT_STOP_DWELL_MIN,
+    SPEED_VARIATION,
+    DEFAULT_TURNAROUND,
+)
 
 log = logging.getLogger(__name__)
-
-# ── Дефолты ───────────────────────────────────────────────────────────────────
-DEFAULT_TURNAROUND  = 2.0
-DEFAULT_TARGET_UTIL = 0.75
-DEFAULT_ROAD_LOAD   = 0.50
-MIN_SPEED_KMH       = 5.0
-SPEED_VARIATION     = 0.05
 
 
 @dataclass
@@ -51,7 +48,6 @@ class RouteStats:
 class RouteConfig:
     route_id: str
     stop_ids: List[int]
-    tram_capacity: int
     flow_speed: float
     peak_stop_index: int
     simulation_hours: int
@@ -63,7 +59,6 @@ class RouteConfig:
     turnaround_time: float = DEFAULT_TURNAROUND
     acceleration_time: float = 0.5
     stop_time: float = 1.0
-    target_utilization: float = DEFAULT_TARGET_UTIL
     random_seed: Optional[int] = None
     target_intervals: Optional[Dict[str, Dict[str, int]]] = None
     penalties_config: dict = field(default_factory=dict)
@@ -77,6 +72,7 @@ class RouteConfig:
     depreciation_per_km: float = 0.0        # амортизация на км, руб.
     payroll_per_trip: float = 0.0            # ФОТ на рейс, руб.
     maintenance_fixed_per_trip: float = 0.0  # ТОиР на рейс (фикс.), руб.
+    tram_count: Optional[int] = None        # количество трамваев на маршруте
 
     @property
     def stop_number(self) -> int:
@@ -90,7 +86,14 @@ class RouteConfig:
         distances = {item[0]: item[1] for item in c["distance"]}
         distances_list = [float(item[1]) for item in c["distance"]]
 
-        road_loads = {hour: load for hour, load in c["road_loads"]}
+        # Загружаем коэффициенты из внешнего файла configs/road_load.json
+        try:
+            with open("configs/road_load.json", "r", encoding="utf-8") as rf:
+                rl_data = json.load(rf)
+            road_loads = {int(hour): float(load) for hour, load in rl_data["road_loads"]}
+        except Exception as e:
+            log.warning(f"Failed to load road_load.json, fallback to config road_loads: {e}")
+            road_loads = {hour: load for hour, load in c["road_loads"]}
 
         stop_ids = c.get("stop_ids", list(range(1, c["stop_number"] + 1)))
 
@@ -116,8 +119,7 @@ class RouteConfig:
         return cls(
             route_id=config_route_id,
             stop_ids=stop_ids,
-            tram_capacity=c["tram_capacity"],
-            flow_speed=c["flow_speed"],
+            flow_speed=17.0,
             peak_stop_index=peak_stop_index,
             simulation_hours=c["simulation_hours"],
             distances=distances,
@@ -128,7 +130,6 @@ class RouteConfig:
             turnaround_time=c.get("turnaround_time", DEFAULT_TURNAROUND),
             acceleration_time=c.get("acceleration_time", 0.5),
             stop_time=c.get("stop_time", 1.0),
-            target_utilization=c.get("target_utilization", DEFAULT_TARGET_UTIL),
             random_seed=c.get("random_seed", None),
             target_intervals=target_intervals,
             contract_revenue_per_km=c.get("contract_revenue_per_km", 529.5),
@@ -137,6 +138,7 @@ class RouteConfig:
             depreciation_per_km=c.get("depreciation_per_km", 0.0),
             payroll_per_trip=c.get("payroll_per_trip", 0.0),
             maintenance_fixed_per_trip=c.get("maintenance_fixed_per_trip", 0.0),
+            tram_count=c.get("tram_count", None),
         )
 
 
@@ -173,7 +175,7 @@ class Route:
         hour = (t_min // 60) % 24
         rl   = self.config.road_loads
         if not rl:
-            return DEFAULT_ROAD_LOAD
+            return 1.0
         hours = sorted(rl)
         if hour in rl:
             return rl[hour]
@@ -191,9 +193,8 @@ class Route:
         if distance <= 0:
             return 0.0
         load  = self._get_road_load(t_min)
-        speed = self.config.flow_speed * (1.0 - load)
+        speed = self.config.flow_speed * load
         speed *= random.uniform(1.0 - SPEED_VARIATION, 1.0 + SPEED_VARIATION)
-        speed = max(speed, MIN_SPEED_KMH)
         base_time = (distance / 1000.0) * (60.0 / speed) + self.config.acceleration_time
         
         traffic_light_delay = 0.0

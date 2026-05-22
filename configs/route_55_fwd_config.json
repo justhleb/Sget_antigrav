@@ -230,10 +230,7 @@
       0.1
     ]
   ],
-  "flow_speed": 15,
-  "peak_stop": 55019,
-  "tram_capacity": 150,
-  "tram_count": 8,
+  "tram_count": 30,
   "simulation_hours": 24,
   "acceleration_time": 0.5,
   "stop_time": 0.25,

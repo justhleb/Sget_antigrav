@@ -6,13 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
 
-from constants import (
-    BASE_ALIGHT_RATE,
-    PEAK_ALIGHT_MULT,
-    END_BONUS_MAX,
-    MAX_ALIGHT_RATE,
-)
-
 
 @dataclass
 class TramStats:
@@ -27,55 +20,17 @@ class TramStats:
 
 class Tram:
 
-    def __init__(self, tram_id: int, route_id: str, capacity: int, lightweight_mode: bool = False):
+    def __init__(self, tram_id: int, route_id: str, lightweight_mode: bool = False):
         self.tram_id = tram_id
         self.route_id = route_id
-        self.capacity = capacity
         self.passengers: int = 0
         self.direction: str = "forward"
         self.stats = TramStats(tram_id=tram_id, route_id=route_id)
         self.lightweight_mode = lightweight_mode
 
     @property
-    def free_seats(self) -> int:
-        return self.capacity - self.passengers
-
-    @property
     def utilization(self) -> float:
-        return self.passengers / self.capacity if self.capacity > 0 else 0.0
-
-    def board_passengers(self, waiting: int) -> int:
-        can_board = min(waiting, self.free_seats)
-        self.passengers += can_board
-        return can_board
-
-    def alight_passengers(self, stop_index: int, total_stops: int, peak_stop_index: int) -> int:
-        if self.passengers == 0:
-            return 0
-
-        is_terminal = (
-            (self.direction == "forward"  and stop_index == total_stops) or
-            (self.direction == "backward" and stop_index == 1)
-        )
-        if is_terminal:
-            alighted = self.passengers
-            self.passengers = 0
-            return alighted
-
-        rate = BASE_ALIGHT_RATE
-        if stop_index == peak_stop_index:
-            rate = min(rate * PEAK_ALIGHT_MULT, MAX_ALIGHT_RATE)
-
-        progress = (
-            stop_index / total_stops
-            if self.direction == "forward"
-            else (total_stops - stop_index + 1) / total_stops
-        )
-        rate = min(rate + progress * END_BONUS_MAX, MAX_ALIGHT_RATE)
-
-        alighted = int(self.passengers * rate)
-        self.passengers -= alighted
-        return alighted
+        return 0.0
 
     def log_stop_event(
         self,

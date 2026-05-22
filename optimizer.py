@@ -32,15 +32,15 @@ ROUTE_PAIRS = {
 }
 
 N_ROUTES = len(ROUTE_PAIRS)   # 3
-N_MAX    = 30                  # бюджет парка (контрактные ограничения)
-MAX_PER_ROUTE = 12             # макс. выпуск на один маршрут
+N_MAX    = 67                  # бюджет парка (контрактные ограничения: 21 + 16 + 30)
+MAX_PER_ROUTE_MAP = np.array([21, 16, 30])  # макс. выпуск по контракту для [20, 48, 55]
 
 
 # ─── задача оптимизации ───────────────────────────────────────────────────────
 
 class TramFleetProblem(ElementwiseProblem):
     """
-    Переменные:   x = [n_20, n_48, n_55]  — целые, диапазон [0, MAX_PER_ROUTE]
+    Переменные:   x = [n_20, n_48, n_55]  — целые, диапазон [0, max_per_route]
     Цели:         F = [headway_mae, -total_revenue]  — минимизируем обе
                      (pymoo минимизирует, поэтому revenue с минусом)
     Ограничения:  G = [sum(x) - N_MAX]  ≤ 0
@@ -52,7 +52,7 @@ class TramFleetProblem(ElementwiseProblem):
             n_obj=2,
             n_ieq_constr=1,
             xl=np.full(N_ROUTES, 0),            # мин 0 ТС на маршрут
-            xu=np.full(N_ROUTES, MAX_PER_ROUTE), # макс по контракту
+            xu=MAX_PER_ROUTE_MAP,                # макс по контракту для каждого маршрута
             vtype=int,
             runner=runner,
         )
@@ -164,4 +164,4 @@ def _save_results(res, out_dir: str):
 # ─── точка входа ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    run_nsga2(n_max=30, pop_size=25, n_gen=5)
+    run_nsga2(n_max=N_MAX, pop_size=25, n_gen=5)
