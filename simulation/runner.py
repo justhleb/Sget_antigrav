@@ -16,16 +16,24 @@ from simulation.multi_route import MultiRouteSimulation
 from constants import DEFAULT_CONFIGS_DIR
 
 class SimulationConsoleFilter(logging.Filter):
+    """
+    Фильтр для консольного логирования.
+    
+    Пропускает на консоль только итоговые результаты симуляции (logger 'simulation.results')
+    или сообщения об ошибках/предупреждениях (уровень WARNING и выше).
+    Обычные отладочные сообщения о движении трамваев выводятся только в файл лога.
+    """
     def filter(self, record):
         return record.name == "simulation.results" or record.levelno >= logging.WARNING
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 
-# Clear existing handlers to prevent duplicates
+# Очищаем существующие обработчики для избежания дублирования логов
 for h in root_logger.handlers[:]:
     root_logger.removeHandler(h)
 
+# Настройка вывода на консоль
 console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(logging.Formatter("%(message)s"))
@@ -40,6 +48,13 @@ DEFAULT_CONFIGS_DIR_PATH = Path(DEFAULT_CONFIGS_DIR)
 def resolve_route_pairs(
     route_ids: list[str], configs_dir: Path
 ) -> dict[str, tuple[str, str]]:
+    """
+    Находит и сопоставляет JSON-конфиги прямого (fwd) и обратного (bwd) направлений для списка маршрутов.
+
+    :param route_ids: Список номеров маршрутов (например, ["20", "48"]).
+    :param configs_dir: Папка, в которой находятся файлы конфигурации.
+    :return: Словарь вида {"ID_маршрута": ("путь_fwd", "путь_bwd")}.
+    """
     pairs   = {}
     missing = []
 
@@ -55,6 +70,7 @@ def resolve_route_pairs(
         if fwd.exists() and bwd.exists():
             pairs[route_id] = (str(fwd), str(bwd))
 
+    # Если хотя бы один файл конфигурации не найден, завершаем программу с ошибкой
     if missing:
         log.error("Не найдены конфиги:")
         for m in missing:
@@ -69,6 +85,12 @@ def resolve_route_pairs(
 
 
 def main():
+    """
+    Основная функция CLI-интерфейса.
+    
+    Разбирает аргументы командной строки, находит нужные конфигурационные файлы,
+    распределяет подвижной состав по маршрутам и запускает MultiRouteSimulation.
+    """
     parser = argparse.ArgumentParser(
         description="Мультимаршрутная симуляция трамваев",
         formatter_class=argparse.RawTextHelpFormatter,
@@ -108,7 +130,7 @@ def main():
     route_pairs = resolve_route_pairs(args.routes, args.configs_dir)
     n_routes    = len(route_pairs)
 
-    # Разбираем --trams
+    # Определение количества трамваев по маршрутам
     if args.trams is None:
         tram_counts = []
         for route_id, (fwd_path, bwd_path) in route_pairs.items():
@@ -119,7 +141,7 @@ def main():
                 sys.exit(1)
             tram_counts.append(fwd_cfg.tram_count)
     elif len(args.trams) == 1:
-        tram_counts = args.trams * n_routes          # одно число → на все маршруты
+        tram_counts = args.trams * n_routes          # Одно число применяется ко всем маршрутам
     elif len(args.trams) == n_routes:
         tram_counts = args.trams
     else:
@@ -133,6 +155,7 @@ def main():
     for route_id, count in zip(route_pairs.keys(), tram_counts):
         log.info(f"  маршрут {route_id}: {count} трамваев")
 
+    # Инициализация и запуск мультимаршрутного симулятора
     sim = MultiRouteSimulation(route_pairs, tram_counts=tram_counts)
     sim.run(
         plot_graphs=not args.no_plots,

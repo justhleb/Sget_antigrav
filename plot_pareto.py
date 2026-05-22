@@ -1,11 +1,17 @@
 # plot_pareto.py
 """
-Визуализация Pareto-фронта NSGA-II.
+Модуль визуализации результатов многокритериальной оптимизации (Парето-фронта) NSGA-II.
 
-Цели:
-  1. headway_mae_min  — точность поддержания интервала (мин, меньше лучше)
-  2. total_revenue    — чистый доход (руб., больше лучше)
+В рамках задачи оптимизации мы ищем баланс между двумя противоречивыми целями:
+1. Качество соблюдения интервалов (headway_mae_min, в минутах, меньше — лучше).
+2. Общий полученный доход (total_revenue, в рублях, больше — лучше).
+
+Модуль строит три информативных графика для лица, принимающего решения:
+1. Зависимость дохода от точности интервалов (с аннотациями экстремальных решений).
+2. Детальный столбчатый график распределения парка трамваев по маршрутам для Топ-10 лучших решений.
+3. Взаимосвязь суммарного размера парка и итогового дохода с цветовой индикацией ошибок интервалов.
 """
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,18 +20,26 @@ import os
 
 
 def plot_pareto(csv_path: str, out_dir: str = None):
+    """
+    Считывает CSV-файл с решениями Парето-фронта и генерирует три графика.
+
+    :param csv_path: Путь к файлу pareto_front.csv, сгенерированному оптимизатором.
+    :param out_dir: Папка для сохранения PNG-изображений графиков. Если не задана, используется папка файла CSV.
+    """
     df = pd.read_csv(csv_path)
     out_dir = out_dir or os.path.dirname(csv_path) or "."
 
-    # Фикс знаков (pymoo минимизирует → revenue мог сохраниться с минусом)
+    # Нормализуем доход (pymoo минимизирует, поэтому в исходных расчетах выручка могла быть отрицательной)
     if "total_revenue" in df.columns:
         df["total_revenue"] = df["total_revenue"].abs()
 
+    # Суммарное число трамваев по каждому решению для цветовой нормализации
     total_trams = df[["n_20", "n_48", "n_55"]].sum(axis=1).values
     norm  = plt.Normalize(total_trams.min(), total_trams.max())
-    cmap  = "viridis"
+    cmap  = "viridis"  # Красивая и понятная палитра
 
     def _scatter(ax, x_col, y_col, x_label, y_label):
+        """Вспомогательный метод для построения scatter-графика."""
         sc = ax.scatter(
             df[x_col], df[y_col],
             c=total_trams, cmap=cmap, norm=norm,
@@ -37,6 +51,7 @@ def plot_pareto(csv_path: str, out_dir: str = None):
         return sc
 
     def _annotate_extremes(ax, x_col, y_col):
+        """Вспомогательный метод для добавления стрелок и текстовых аннотаций к экстремальным решениям."""
         candidates = {
             "макс доход":  df["total_revenue"].idxmax()   if "total_revenue" in df.columns else None,
             "мин mae":     df["headway_mae_min"].idxmin()  if "headway_mae_min" in df.columns else None,
@@ -44,6 +59,7 @@ def plot_pareto(csv_path: str, out_dir: str = None):
         for label, idx in candidates.items():
             if idx is None:
                 continue
+            # Формируем красивую подпись с распределением парка: [n_20, n_48, n_55]
             ax.annotate(
                 f'{label}\n[{int(df.loc[idx,"n_20"])},{int(df.loc[idx,"n_48"])},{int(df.loc[idx,"n_55"])}]',
                 xy=(df.loc[idx, x_col], df.loc[idx, y_col]),
@@ -54,7 +70,7 @@ def plot_pareto(csv_path: str, out_dir: str = None):
 
     created = []
 
-    # ── Основной 2D график: Revenue vs Headway MAE ──────────────────────────
+    # ── 1. Основной 2D график: Выручка vs Точность интервалов (MAE) ──────────
     fig, ax = plt.subplots(figsize=(10, 7))
     sc = _scatter(ax, "total_revenue", "headway_mae_min",
                   "Доход (руб.) →",
@@ -76,19 +92,21 @@ def plot_pareto(csv_path: str, out_dir: str = None):
     print(f"Сохранён: {out_path}")
     created.append(out_path)
 
-    # ── Барчарт: распределение ТС по маршрутам для top-5 решений ─────────────
+    # ── 2. Столбчатый график: распределение парка для Топ-10 решений ──────────
     top_n = min(10, len(df))
+    # Сортируем решения по выручке и берем первые top_n
     df_sorted = df.sort_values("total_revenue", ascending=False).head(top_n).reset_index(drop=True)
 
     fig, ax = plt.subplots(figsize=(12, 6))
     x_pos = np.arange(top_n)
     width = 0.25
 
+    # Строим три столбца для каждого решения (по числу трамваев на каждом маршруте)
     bars_20 = ax.bar(x_pos - width, df_sorted["n_20"], width, label="Маршрут 20", color="#2196F3", alpha=0.85)
     bars_48 = ax.bar(x_pos,         df_sorted["n_48"], width, label="Маршрут 48", color="#4CAF50", alpha=0.85)
     bars_55 = ax.bar(x_pos + width, df_sorted["n_55"], width, label="Маршрут 55", color="#FF9800", alpha=0.85)
 
-    # Подписи дохода сверху
+    # Добавляем текстовые подписи (Доход / MAE) над каждой группой столбцов
     for i in range(top_n):
         total = df_sorted.loc[i, "total_revenue"]
         mae   = df_sorted.loc[i, "headway_mae_min"]
@@ -96,10 +114,10 @@ def plot_pareto(csv_path: str, out_dir: str = None):
                 f"{total/1000:.0f}к\n{mae:.1f}м",
                 ha="center", fontsize=7, color="darkred")
 
-    ax.set_xlabel("Решение (ранжировано по доходу)", fontsize=11)
+    ax.set_xlabel("Решение (ранжировано по убыванию дохода)", fontsize=11)
     ax.set_ylabel("Количество трамваев", fontsize=11)
     ax.set_title(
-        f"Топ-{top_n} решений Pareto: распределение парка",
+        f"Топ-{top_n} решений Pareto: распределение парка по маршрутам",
         fontsize=12, fontweight="bold",
     )
     ax.set_xticks(x_pos)
@@ -114,9 +132,11 @@ def plot_pareto(csv_path: str, out_dir: str = None):
     print(f"Сохранён: {out_path}")
     created.append(out_path)
 
-    # ── Revenue по маршрутам (если есть per-route данные) ─────────────────────
+    # ── 3. Размер парка vs Доход с цветовой индикацией точности ─────────────
     if "total_trams" in df.columns:
         fig, ax = plt.subplots(figsize=(9, 6))
+        # Цветовая шкала: RdYlGn_r (красный -> желтый -> зеленый, реверсивный). 
+        # Зеленый — маленькая ошибка MAE (отлично), красный — большая ошибка.
         sc = ax.scatter(
             df["total_trams"], df["total_revenue"],
             c=df["headway_mae_min"], cmap="RdYlGn_r",
@@ -139,9 +159,11 @@ def plot_pareto(csv_path: str, out_dir: str = None):
         print(f"Сохранён: {out_path}")
         created.append(out_path)
 
-    print(f"\nВсего графиков: {len(created)}")
+    print(f"\nВсего графиков Парето сгенерировано: {len(created)}")
     return created
 
+
+# ─── Точка запуска из консоли ────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

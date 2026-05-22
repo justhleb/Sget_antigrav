@@ -1,10 +1,13 @@
 """
-Парсер агрегированной финансовой статистики из Excel файлов (summary_reports).
+Парсер агрегированной финансовой статистики из Excel файлов (директория summary_reports).
 
-Каждый файл — один маршрут. Двухуровневые заголовки:
-  (№ п/п, ТС) | (Пассажиры, чел. → На 1 час/На 1 км) | (Доходы, руб. → На 1 час/На 1 км)
+Этот модуль считывает экономические показатели по каждому трамвайному маршруту из отчетов Excel.
+Каждый файл содержит статистику по конкретным транспортным средствам (ТС) на маршруте:
+- Количество перевезенных пассажиров за час и на 1 км пробега.
+- Полученные доходы за час и на 1 км пробега.
 
-Результат: словарь {route_id: RouteEconomics} со средними удельными показателями.
+Результатом работы является словарь, сопоставляющий ID маршрута с агрегированными 
+экономическими показателями (средними по всем ТС).
 """
 from __future__ import annotations
 
@@ -19,53 +22,70 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
+# Дефолтный путь к папке с отчетами относительно текущего файла
 SUMMARY_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "summary_reports")
 
 
 @dataclass
 class VehicleEconomics:
-    """Статистика одного ТС на конкретном маршруте."""
-    vehicle_id: str
-    passengers_per_hour: float
-    passengers_per_km: float
-    revenue_per_hour: float   # руб.
-    revenue_per_km: float      # руб.
+    """
+    Класс для хранения экономической статистики одного транспортного средства (ТС) на маршруте.
+    """
+    vehicle_id: str             # Уникальный идентификатор/номер ТС
+    passengers_per_hour: float  # Среднее количество перевезенных пассажиров в час
+    passengers_per_km: float    # Среднее количество перевезенных пассажиров на 1 км пробега
+    revenue_per_hour: float     # Средний доход в час (руб.)
+    revenue_per_km: float       # Средний доход на 1 км пробега (руб.)
 
 
 @dataclass
 class RouteEconomics:
-    """Агрегированная экономическая статистика маршрута."""
-    route_id: str
-    vehicles: List[VehicleEconomics] = field(default_factory=list)
+    """
+    Класс для хранения агрегированной экономической статистики по всему маршруту.
+    Вычисляет средние удельные показатели на основе данных от всех ТС, работающих на маршруте.
+    """
+    route_id: str                                    # Идентификатор маршрута (например, "20", "48", "55")
+    vehicles: List[VehicleEconomics] = field(default_factory=list) # Список статистики по всем ТС
 
-    # ── средние по всем ТС ────────────────────────────────────────────────────
+    # ── Средние удельные показатели по всем ТС маршрута ───────────────────────
+    
     @property
     def mean_passengers_per_km(self) -> float:
+        """Среднее число пассажиров на 1 км пробега по всем ТС."""
         if not self.vehicles:
             return 0.0
         return sum(v.passengers_per_km for v in self.vehicles) / len(self.vehicles)
 
     @property
     def mean_revenue_per_km(self) -> float:
+        """Средний доход на 1 км пробега (в рублях) по всем ТС."""
         if not self.vehicles:
             return 0.0
         return sum(v.revenue_per_km for v in self.vehicles) / len(self.vehicles)
 
     @property
     def mean_passengers_per_hour(self) -> float:
+        """Среднее число пассажиров в час по всем ТС."""
         if not self.vehicles:
             return 0.0
         return sum(v.passengers_per_hour for v in self.vehicles) / len(self.vehicles)
 
     @property
     def mean_revenue_per_hour(self) -> float:
+        """Средний доход в час (в рублях) по всем ТС."""
         if not self.vehicles:
             return 0.0
         return sum(v.revenue_per_hour for v in self.vehicles) / len(self.vehicles)
 
 
 def _extract_route_id(filename: str) -> str:
-    """summary_report_20.xlsx → '20'"""
+    """
+    Извлекает идентификатор маршрута из имени файла.
+    Пример: "summary_report_20.xlsx" -> "20"
+    
+    :param filename: Имя или путь к файлу.
+    :return: Строковый идентификатор маршрута.
+    """
     m = re.search(r"summary_report_(\d+)", filename)
     return m.group(1) if m else os.path.splitext(os.path.basename(filename))[0]
 
@@ -74,12 +94,14 @@ def load_route_economics(
     summary_dir: str = SUMMARY_DIR,
 ) -> Dict[str, RouteEconomics]:
     """
-    Загружает все xlsx файлы из summary_dir.
+    Загружает экономические данные из всех Excel-файлов в указанной директории summary_dir.
+    Ожидаются файлы с маской summary_report_*.xlsx.
+    
+    Каждый файл парсится с помощью pandas. Файлы имеют двухуровневую шапку:
+      (№ п/п, ТС) | (Пассажиры, чел. -> На 1 час/На 1 км) | (Доходы, руб. -> На 1 час/На 1 км)
 
-    Returns
-    -------
-    Dict[str, RouteEconomics]
-        Ключ — route_id (строка), значение — агрегированная статистика.
+    :param summary_dir: Путь к директории с отчетами Excel.
+    :return: Словарь, где ключ — строковый ID маршрута, а значение — объект RouteEconomics.
     """
     result: Dict[str, RouteEconomics] = {}
     pattern = os.path.join(summary_dir, "summary_report_*.xlsx")
@@ -93,10 +115,11 @@ def load_route_economics(
         route_id = _extract_route_id(filepath)
         log.info(f"Загрузка экономических данных маршрута {route_id}: {filepath}")
 
+        # Считываем Excel-файл с мультииндексом в качестве заголовка (двухуровневая шапка)
         df = pd.read_excel(filepath, header=[0, 1])
 
-        # Нормализуем имена столбцов
-        # Ожидаемый порядок: ТС, Пасс/час, Пасс/км, Доход/час, Доход/км
+        # Нормализуем имена столбцов и проверяем структуру
+        # Ожидаемый порядок столбцов: ТС, Пассажиры/час, Пассажиры/км, Доходы/час, Доходы/км
         cols = df.columns.tolist()
         if len(cols) < 5:
             log.warning(f"Файл {filepath}: ожидалось ≥5 столбцов, получено {len(cols)} — пропуск")
@@ -114,7 +137,7 @@ def load_route_economics(
                 log.warning(f"Маршрут {route_id}: пропуск строки с ТС '{vehicle_id}' (нечисловые данные)")
                 continue
 
-            # Фильтруем аномальные/пустые строки
+            # Фильтруем пустые или аномальные строки, где нет ни пробега, ни доходов
             if pax_km <= 0 and rev_km <= 0:
                 continue
 

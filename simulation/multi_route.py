@@ -40,10 +40,14 @@ results_log = logging.getLogger("simulation.results")
 
 class TramPair:
     """
-    Пара fwd/bwd маршрутов с тремя Store:
-      pool     — свободные трамваи (депо)
-      fwd_done — трамваи завершившие fwd, ждут разворота
-      bwd_done — трамваи завершившие bwd, ждут отдыха
+    Класс-связка, управляющий парой противоположных направлений одного маршрута (fwd и bwd).
+    
+    Он координирует жизненный цикл парка трамваев, закрепленных за данным маршрутом:
+      - Утренний выпуск на линию из пула (pool/депо).
+      - Движение по прямому направлению (Route fwd).
+      - Направление в промежуточный буфер разворота (fwd_done) и процесс разворота.
+      - Движение по обратному направлению (Route bwd) из буфера bwd_ready.
+      - Возврат в депо (bwd_done), прохождение отдыха водителем и повторный выпуск с контролем интервалов.
     """
 
     def __init__(
@@ -57,16 +61,31 @@ class TramPair:
         tram_id_offset: int,
         lightweight_mode: bool = False,
     ):
+        """
+        Инициализация пары направлений маршрута и его подвижного состава.
+
+        :param route_num: Номер маршрута (например, "20", "48", "55").
+        :param fwd_config: Конфигурация прямого направления (RouteConfig).
+        :param bwd_config: Конфигурация обратного направления (RouteConfig).
+        :param env: Модельное окружение SimPy.
+        :param shared_stops: Общий словарь остановок.
+        :param tram_count: Количество выделенных трамваев.
+        :param tram_id_offset: Смещение для генерации уникальных ID вагонов.
+        :param lightweight_mode: Легковесный режим (без логирования подробных событий).
+        """
         self.route_num = route_num
         self.env = env
 
-        self.pool      = simpy.Store(env)
-        self.fwd_done  = simpy.Store(env)
-        self.bwd_ready = simpy.Store(env)  # Промежуточный Store для развернутых трамваев
-        self.bwd_done  = simpy.Store(env)
+        # SimPy-накопители для управления состояниями трамваев
+        self.pool      = simpy.Store(env)          # Депо / Свободные трамваи для прямого рейса (fwd)
+        self.fwd_done  = simpy.Store(env)          # Трамваи, закончившие fwd-рейс и ожидающие разворота
+        self.bwd_ready = simpy.Store(env)          # Буфер готовых к обратному рейсу (bwd) трамваев
+        self.bwd_done  = simpy.Store(env)          # Трамваи, закончившие bwd-рейс и ожидающие отдыха в депо
 
-        self.last_fwd_dispatch_time: float = 0.0  # время последнего выпуска на fwd
+        # Модельное время последнего выпуска трамвая на fwd-направление (для соблюдения интервалов)
+        self.last_fwd_dispatch_time: float = 0.0
 
+        # Инициализируем два асинхронных процесса направлений движения
         self.fwd = Route(fwd_config, env, shared_stops,
                          available_trams=self.pool,
                          done_store=self.fwd_done)
@@ -78,6 +97,9 @@ class TramPair:
         self._spawn_trams(tram_count, tram_id_offset, lightweight_mode)
 
     def _spawn_trams(self, count: int, id_offset: int, lightweight_mode: bool):
+        """
+        Создает парк трамваев с уникальными ID и регистрирует их в системе.
+        """
         for i in range(count):
             tram_id = id_offset + i + 1
             tram = Tram(tram_id, self.route_num, lightweight_mode=lightweight_mode)
@@ -88,6 +110,9 @@ class TramPair:
         )
 
     def start(self):
+        """
+        Запускает все асинхронные процессы маршрута в SimPy.
+        """
         self.fwd.start()
         self.bwd.start()
         self.env.process(self._turnaround_process())
@@ -95,7 +120,10 @@ class TramPair:
         self.env.process(self._interval_aware_release())
 
     def _get_target_interval(self, t_min: float) -> float:
-        """Целевой интервал (мин) для fwd-маршрута на момент t_min."""
+        """
+        Возвращает целевой интервал движения (в минутах) для текущего часа симуляции.
+        Если целевые интервалы не заданы, рассчитывает ориентировочный интервал (fallback).
+        """
         intervals = self.fwd.config.target_intervals
         if not intervals:
             return self._calc_fallback_interval()
@@ -111,7 +139,13 @@ class TramPair:
         return direction_intervals.get(hour_str, self._calc_fallback_interval())
 
     def _calc_fallback_interval(self) -> float:
-        """Fallback: оценка интервала = время_кругорейса / N."""
+        """
+        Резервный расчет интервала движения по формуле:
+        интервал = полное_время_оборота / количество_трамваев.
+        
+        Учитывает время движения в обе стороны с текущей загрузкой дорог, 
+        время стоянок на всех остановках, время разворота и минимальный отдых водителя.
+        """
         fwd_km = sum(self.fwd.config.distances_list) / 1000
         bwd_km = sum(self.bwd.config.distances_list) / 1000
         load = self.fwd._get_road_load(self.env.now)
@@ -126,7 +160,13 @@ class TramPair:
         return round_trip / n
 
     def _interval_aware_release(self):
-        """Утренний выпуск трамваев с целевым интервалом текущего часа."""
+        """
+        SimPy-процесс: Первоначальный утренний выпуск трамваев на линию.
+        
+        Выпускает трамваи из депо один за другим с соблюдением целевого интервала.
+        Для каждого вагона фиксируется расчетное плановое время выпуска для 
+        контроля отклонений (Type 1 штрафы).
+        """
         for i, tram in enumerate(self.all_trams):
             if i > 0:
                 interval = self._get_target_interval(self.env.now)
@@ -146,12 +186,21 @@ class TramPair:
             yield self.pool.put(tram)
 
     def _turnaround_process(self):
-        """Слушает fwd_done и запускает параллельный процесс разворота для каждого трамвая."""
+        """
+        SimPy-процесс: Диспетчер разворота.
+        
+        Ожидает появления трамваев в fwd_done (закончивших рейс "туда")
+        и запускает для каждого индивидуальный асинхронный процесс разворота.
+        """
         while True:
             tram = yield self.fwd_done.get()
             self.env.process(self._individual_turnaround(tram))
 
     def _individual_turnaround(self, tram: Tram):
+        """
+        Моделирует технологическое время разворота трамвая на конечном кольце.
+        После завершения переводит вагон в буфер bwd_ready для поездки обратно.
+        """
         turnaround = self.fwd.config.turnaround_time
         log.info(
             f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
@@ -161,12 +210,25 @@ class TramPair:
         yield self.bwd_ready.put(tram)
 
     def _rest_process(self):
-        """Слушает bwd_done и запускает параллельный процесс отдыха для каждого трамвая."""
+        """
+        SimPy-процесс: Диспетчер отдыха водителей в депо / на станции отправления.
+        
+        Ожидает появления вагонов в bwd_done (закончивших рейс "обратно")
+        и отправляет их на отдых перед новым кругом.
+        """
         while True:
             tram = yield self.bwd_done.get()
             self.env.process(self._individual_rest_and_release(tram))
 
     def _individual_rest_and_release(self, tram: Tram):
+        """
+        Моделирует процесс отдыха водителя в депо и последующий выпуск на линию.
+        
+        После обязательного отдыха водителя (min_rest_time) вагон планируется к выпуску.
+        Если расчетное время выпуска еще не наступило (для выдерживания интервала 
+        относительно предыдущего отправленного трамвая), вагон ждет на путях отстоя.
+        Если интервал уже упущен из-за задержек в пути, трамвай выпускается немедленно.
+        """
         rest_time = max(self.fwd.config.min_rest_time, MIN_REST_TIME)
         log.info(
             f"[{self.env.now:.1f}] Трамвай #{tram.tram_id} "
@@ -174,7 +236,7 @@ class TramPair:
         )
         yield self.env.timeout(rest_time)
 
-        # Резервируем следующий слот выпуска
+        # Вычисляем целевое время следующего выпуска
         target_interval = self._get_target_interval(self.env.now)
         next_dispatch = max(self.last_fwd_dispatch_time + target_interval, self.env.now)
         self.last_fwd_dispatch_time = next_dispatch
@@ -193,6 +255,7 @@ class TramPair:
                 f"опоздание на {-wait:.1f} мин — выпуск сразу"
             )
 
+        # Сохраняем плановое и фактическое время для штрафных проверок
         tram.target_release_time = next_dispatch
         tram.actual_release_time = self.env.now
         log.info(
@@ -203,19 +266,40 @@ class TramPair:
 
 
 class MultiRouteSimulation:
+    """
+    Класс-оркестратор симуляции движения трамваев по нескольким маршрутам одновременно.
+    
+    Он отвечает за:
+      - Инициализацию модельного окружения SimPy.
+      - Создание и настройку остановок (Stop).
+      - Загрузку внешних экономических нормативов из файлов Excel.
+      - Загрузку конфигурации штрафных санкций и допусков.
+      - Инициализацию объектов TramPair для управления каждым маршрутом.
+      - Запуск симуляции и последующий сбор, сохранение и визуализацию результатов.
+    """
 
     def __init__(
         self,
         route_pairs: Dict[str, Tuple[str, str]],
         tram_counts: Optional[List[int]] = None,
         run_dir: Optional[str] = None,
-        silent: bool = False,   # True — оптимизатор, папка не создаётся
-        lightweight_mode: bool = False, # True — не сохраняем историю событий
+        silent: bool = False,   # True — для оптимизатора, папки результатов не создаются
+        lightweight_mode: bool = False, # True — для экономии памяти, не сохраняет историю в трамваях
     ):
+        """
+        Инициализация симуляции для набора маршрутов.
+
+        :param route_pairs: Словарь вида {"номер_маршрута": ("путь_к_fwd_cfg", "путь_к_bwd_cfg")}.
+        :param tram_counts: Список количества трамваев на каждый маршрут. Если None, загружается из JSON.
+        :param run_dir: Путь к папке результатов. Если None, создается автоматически с timestamp.
+        :param silent: Если True, папки на диске не создаются (используется при многократном запуске оптимизатором).
+        :param lightweight_mode: Если True, отключается сохранение детальной истории остановок вагонами.
+        """
         self.env = simpy.Environment()
         self.shared_stops: Dict[int, Stop] = {}
         self.pairs: List[TramPair] = []
 
+        # Настраиваем директорию результатов
         if silent:
             self.run_dir = None
         elif run_dir is not None:
@@ -249,6 +333,7 @@ class MultiRouteSimulation:
 
         items = list(route_pairs.items())
 
+        # Если количество трамваев не задано явно, считываем его из JSON-файлов конфигурации
         if tram_counts is None:
             tram_counts = []
             for route_num, (fwd_file, bwd_file) in items:
@@ -259,6 +344,7 @@ class MultiRouteSimulation:
                     )
                 tram_counts.append(fwd_cfg_temp.tram_count)
 
+        # Создаем TramPair для каждого маршрута
         for i, (route_num, (fwd_file, bwd_file)) in enumerate(items):
             fwd_cfg = RouteConfig.from_json(fwd_file)
             bwd_cfg = RouteConfig.from_json(bwd_file)
@@ -266,7 +352,7 @@ class MultiRouteSimulation:
             fwd_cfg.penalties_config = self.penalties_config
             bwd_cfg.penalties_config = self.penalties_config
 
-            # Инжектим экономические нормативы в конфиг маршрута
+            # Инжектируем экономические показатели, рассчитанные из отчетов Excel
             econ = self.route_economics.get(route_num)
             if econ is not None:
                 fwd_cfg.revenue_per_km    = econ.mean_revenue_per_km
@@ -284,6 +370,7 @@ class MultiRouteSimulation:
                     f"revenue_per_km и passengers_per_km будут = 0"
                 )
 
+            # Регистрируем остановки маршрута в глобальном словаре
             self._register_stops(fwd_cfg)
             self._register_stops(bwd_cfg)
 
@@ -309,7 +396,7 @@ class MultiRouteSimulation:
             f"{len(self.shared_stops)} уникальных остановок"
         )
 
-        # ── Добавление файлового лога для всех (включая служебные) сообщений прогона ──────
+        # ── Добавление файлового лога для всех сообщений прогона ────────────────
         if self.run_dir:
             logs_dir = os.path.join(self.run_dir, "logs")
             log_file_path = os.path.join(logs_dir, "simulation.log")
@@ -328,12 +415,18 @@ class MultiRouteSimulation:
         run_dir: Optional[str] = None,
     ) -> "MultiRouteSimulation":
         """
-        Создаёт симуляцию для NSGA-II — без создания папок на диске.
+        Создаёт симуляцию для работы с оптимизатором NSGA-II.
+        
+        Работает в бесшумном режиме (silent=True), без сохранения файлов и в 
+        легковесном режиме (lightweight_mode=True) для максимальной производительности.
         """
         return cls(route_pairs, tram_counts=tram_counts,
                    run_dir=run_dir, silent=True, lightweight_mode=True)
 
     def _default_penalties_dict(self) -> dict:
+        """
+        Возвращает параметры штрафов и допусков по умолчанию.
+        """
         return {
             "release_early_tolerance_min": 1.0,
             "release_late_tolerance_min": 5.0,
@@ -346,10 +439,14 @@ class MultiRouteSimulation:
     # ── Регистрация остановок ─────────────────────────────────────────────────
 
     def _register_stops(self, cfg: RouteConfig):
+        """
+        Регистрирует остановки из конфигурации направления маршрута.
+        Если остановка с таким ID еще не зарегистрирована, создает её.
+        """
         for stop_id in cfg.stop_ids:
             if stop_id not in self.shared_stops:
                 stop = Stop(stop_id, self.env)
-                # Если папок не создаем — значит оптимизатор (silent), включим легкий режим
+                # Если папок результатов не создаем — значит оптимизатор (silent), включим легкий режим
                 if self.run_dir is None:
                     stop.lightweight_mode = True
                 self.shared_stops[stop_id] = stop
@@ -357,6 +454,9 @@ class MultiRouteSimulation:
     # ── Вспомогательные ───────────────────────────────────────────────────────
 
     def _create_run_directory(self) -> str:
+        """
+        Создает уникальную директорию результатов для текущего запуска симуляции.
+        """
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         run_dir = os.path.join(OUTPUT_DIR, f"run_{ts}")
         os.makedirs(os.path.join(run_dir, "logs"),  exist_ok=True)
@@ -365,17 +465,33 @@ class MultiRouteSimulation:
         return run_dir
 
     def _max_hours(self) -> int:
+        """
+        Определяет максимальную длительность симуляции в часах среди всех маршрутов.
+        """
         return max(
             max(p.fwd.config.simulation_hours, p.bwd.config.simulation_hours)
             for p in self.pairs
         )
 
     def _all_trams(self) -> List[Tram]:
+        """
+        Возвращает плоский список всех трамвайных вагонов во всей симуляции.
+        """
         return [t for p in self.pairs for t in p.all_trams]
 
     # ── Запуск ────────────────────────────────────────────────────────────────
 
     def run(self, plot_graphs: bool = True, save_logs: bool = True):
+        """
+        Запускает симуляцию движения трамваев на полный операционный день.
+        
+        Выполняет:
+          1. Инициализацию и запуск процессов во всех TramPair.
+          2. Прогон SimPy-среды до истечения максимального времени.
+          3. Сбор итоговой статистики.
+          4. Сохранение текстовых и CSV-отчетов (если save_logs=True).
+          5. Генерацию и сохранение диаграмм движения и финансовых показателей (если plot_graphs=True).
+        """
         for pair in self.pairs:
             pair.start()
 
@@ -486,12 +602,13 @@ class MultiRouteSimulation:
 
     def get_objectives(self) -> Tuple[float, float, float, float]:
         """
-        Возвращает (total_tram_km, headway_mae, total_revenue, total_passengers_est).
+        Рассчитывает вектор целевых функций для многокритериальной оптимизации (NSGA-II).
 
-        total_tram_km      — максимизируем (транспортная работа по контракту)
-        headway_mae        — минимизируем (точность поддержания интервала)
-        total_revenue      — максимизируем (чистый доход, руб.)
-        total_pax_est      — расчётные пассажиры
+        Возвращает кортеж из 4 значений:
+          1. total_tram_km      — Общий пробег трамваев (максимизируем, транспортная работа).
+          2. headway_mae        — Среднее отклонение от плановых интервалов (минимизируем, регулярность).
+          3. total_revenue      — Совокупный финансовый результат, руб. (максимизируем, прибыль).
+          4. total_pax_est      — Суммарное расчетное число перевезенных пассажиров (максимизируем).
         """
         total_km = sum(
             r.stats.total_tram_km
@@ -523,6 +640,19 @@ class MultiRouteSimulation:
         return total_km, headway_mae, total_revenue, total_pax_est
 
     def get_full_stats(self) -> dict:
+        """
+        Рассчитывает детальную финансово-эксплуатационную статистику всей системы.
+        
+        Выполняет расчеты в три уровня:
+          1. Для каждого направления отдельно (fwd/bwd): пробег, рейсы, выручка, расходы (OpEx),
+             маржинальная прибыль, отклонения и штрафы за сорванные рейсы (Type 1).
+          2. Агрегированные показатели по маршруту в целом: суммирование результатов, вычисление 
+             штрафов за превышение суточного лимита нарушений интервалов (выпуск и середина),
+             расчет процента выполнения контракта на основе контрактного числа рейсов.
+          3. Глобальные агрегаты по всей сети: суммарные доходы, расходы, штрафы, общая рентабельность ROS.
+          
+        :return: Словарь с подробнейшей статистикой по направлениям, маршрутам и глобально.
+        """
         total_km, headway_mae, total_revenue, total_pax_est = self.get_objectives()
         routes_stats = {}
         route_totals = {}
@@ -595,7 +725,7 @@ class MultiRouteSimulation:
             tot_failed_midpoint = fwd_s["failed_midpoint_trips"] + bwd_s["failed_midpoint_trips"]
             tot_lost_contract = fwd_s["lost_contract_revenue"] + bwd_s["lost_contract_revenue"]
             
-            # Daily penalties calculation
+            # Суточные штрафы при превышении порогового % нарушений рейсов
             release_penalty = 0.0
             midpoint_penalty = 0.0
             
@@ -614,7 +744,7 @@ class MultiRouteSimulation:
             
             tot_penalties = release_penalty + midpoint_penalty
             
-            # Контрактные данные
+            # Контрактные нормативы
             CONTRACT_TRIPS_MAP = {
                 "20": 225,
                 "48": 230,
@@ -700,6 +830,14 @@ class MultiRouteSimulation:
         }
 
     def generate_summary_text(self, stats: dict) -> str:
+        """
+        Форматирует собранную статистику в структурированный текстовый отчет.
+        
+        Отчет содержит разделы:
+          - Статистика по каждому направлению маршрута.
+          - Интегрированная статистика по маршруту (включая выполнение контракта и штрафы).
+          - Глобальные показатели всей транспортной сети.
+        """
         lines = []
         lines.append(f"\n{'='*60}")
         lines.append("РЕЗУЛЬТАТЫ МУЛЬТИМАРШРУТНОЙ СИМУЛЯЦИИ")
@@ -778,6 +916,9 @@ class MultiRouteSimulation:
         return "\n".join(lines)
 
     def _print_stats(self, summary_text: Optional[str] = None):
+        """
+        Записывает сформированный текстовый отчет в лог результатов.
+        """
         if summary_text is None:
             stats = self.get_full_stats()
             summary_text = self.generate_summary_text(stats)

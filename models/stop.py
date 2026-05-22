@@ -4,71 +4,38 @@
 """
 from __future__ import annotations
 
-import math
-import random
-from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict
 
 import simpy
-import numpy as np
-
-
-@dataclass
-class StopEvent:
-    """Одно событие прибытия трамвая на остановку (для логирования)."""
-    time: float
-    route_id: str
-    tram_id: int
-    direction: str
-    waiting_before: int
-    alighted: int
-    boarded: int
-    passengers_in_tram: int
-    utilization_after: float   # 0..1
 
 
 class Stop:
-    """Остановка в общем реестре симуляции."""
+    """
+    Класс, представляющий физическую остановку в транспортной сети.
+    
+    Остановка является общим ресурсом (shared stop) и хранится в едином
+    глобальном реестре MultiRouteSimulation. Это позволяет разным маршрутам
+    (например, 20 и 55) проезжать через одну и ту же физическую остановку,
+    а также корректно отслеживать интервалы (headway) между трамваями.
+    """
 
     def __init__(self, stop_id: int, env: simpy.Environment):
+        """
+        Инициализация остановки.
+
+        :param stop_id: Уникальный глобальный идентификатор остановки (из ГИС-данных)
+        :param env: Окружение имитационного моделирования SimPy
+        """
         self.stop_id = stop_id
         self.env = env
 
-        self.waiting_passengers: int = 0
-        self.last_tram_time: float = 0.0
+        # Словарь для отслеживания времени отправления последнего трамвая с этой остановки.
+        # Ключ: route_id (например, "20_fwd"), значение: float (время в минутах с начала симуляции).
+        # Используется для расчёта фактического интервала движения (headway) между трамваями одного маршрута.
         self.last_tram_departure_time: Dict[str, float] = {}  # per route_id
 
-        # Агрегированная статистика
-        self.total_waiting_time: float = 0.0
-        self.passengers_served: int = 0
-
-        # История для визуализации
-        self.waiting_history: List[tuple] = []   # (time, count)
-        self.event_log: List[StopEvent] = []     # детальные события
+        # Флаг "легкого" режима работы.
+        # Если установлен в True, отключается запись истории событий для экономии памяти (например, при оптимизации).
         self.lightweight_mode: bool = False
 
-    def record_waiting(self):
-        if not self.lightweight_mode:
-            self.waiting_history.append((self.env.now, self.waiting_passengers))
 
-    def add_waiting_time(self, boarded: int, time_since_last: float):
-        """Среднее время ожидания = половина интервала (равномерное прибытие)."""
-        self.total_waiting_time += boarded * (time_since_last / 2.0)
-        self.passengers_served += boarded
-
-    def get_new_passengers(self, intensity_per_hour: float, time_since_last: float) -> int:
-        """Новые пассажиры за время ожидания (Пуассоновское распределение)."""
-        if time_since_last <= 0 or intensity_per_hour <= 0:
-            return 0
-        rate = intensity_per_hour * (time_since_last / 60.0)
-        return int(np.random.poisson(rate)) if rate > 0 else 0
-
-    def log_event(self, event: StopEvent):
-        if not self.lightweight_mode:
-            self.event_log.append(event)
-
-    @property
-    def avg_waiting_time(self) -> float:
-        if self.passengers_served == 0:
-            return 0.0
-        return self.total_waiting_time / self.passengers_served
