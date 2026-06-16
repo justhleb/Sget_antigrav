@@ -8,7 +8,7 @@
 
 Критерии оптимизации (целевые функции):
 1. Минимизация среднего отклонения от целевого интервала (headway MAE) по всем маршрутам.
-2. Максимизация общей маржинальной выручки (pymoo минимизирует, поэтому оптимизируется отрицательная выручка).
+2. Максимизация общего опер. результата (pymoo минимизирует, поэтому оптимизируется отрицательный опер. результат).
 
 Ограничения:
 1. Суммарное количество выпущенных трамваев не должно превышать бюджет парка N_MAX (67 ТС).
@@ -33,12 +33,15 @@ from pymoo.operators.sampling.rnd import IntegerRandomSampling
 from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PM
 from pymoo.operators.repair.rounding import RoundingRepair
+from pymoo.core.repair import Repair
+from pymoo.core.sampling import Sampling
 from pymoo.optimize import minimize
 from pymoo.termination import get_termination
 from multiprocessing.pool import ThreadPool
 import warnings
 
 from simulation.multi_route import MultiRouteSimulation
+from models.route import RouteConfig
 
 warnings.filterwarnings("ignore")
 
@@ -54,7 +57,65 @@ ROUTE_PAIRS = {
 
 N_ROUTES = len(ROUTE_PAIRS)   # Количество оптимизируемых маршрутов (3)
 N_MAX    = 67                  # Общий лимит парка трамваев (21 + 16 + 30)
-MAX_PER_ROUTE_MAP = np.array([21, 16, 30])  # Максимально допустимый выпуск по контракту для [20, 48, 55]
+
+# Динамически загружаем контрактное количество трамваев (tram_count) из конфигурационных файлов
+MAX_PER_ROUTE_MAP = np.array([
+    RouteConfig.from_json(ROUTE_PAIRS[r][0]).tram_count
+    for r in ["20", "48", "55"]
+])
+
+
+# ─── Классы для операторов восстановления и генерации популяции ──────────────
+
+class FleetSizeRepair(Repair):
+    """
+    Класс для восстановления ограничений (repair). Округляет переменные до целых
+    чисел, клипирует по границам и обеспечивает, чтобы сумма значений не превышала лимит.
+    """
+    def __init__(self, n_max: int = N_MAX):
+        super().__init__()
+        self.n_max = n_max
+
+    def _do(self, problem, X, **kwargs):
+        # X может содержать вещественные значения после кроссовера/мутации
+        X_rounded = np.round(X).astype(int)
+        xl = problem.xl
+        xu = problem.xu
+        
+        # Получаем лимит n_max из задачи, если он там настроен кастомно
+        n_max = getattr(problem, "n_max", self.n_max)
+        
+        for i in range(len(X_rounded)):
+            x = X_rounded[i]
+            # Enforce individual bounds
+            x = np.clip(x, xl, xu)
+            
+            # Enforce sum(x) <= n_max
+            while sum(x) > n_max:
+                available_indices = [idx for idx in range(len(x)) if x[idx] > xl[idx]]
+                if not available_indices:
+                    break
+                # Выбираем маршрут с наибольшим парком для уменьшения
+                idx_to_decrease = max(available_indices, key=lambda idx: x[idx])
+                x[idx_to_decrease] -= 1
+            X_rounded[i] = x
+            
+        return X_rounded.astype(float)
+
+
+class FleetSampling(Sampling):
+    """
+    Генератор случайной начальной популяции, гарантирующий, что все сгенерированные
+    особи удовлетворяют ограничению на общий объем парка n_max.
+    """
+    def _do(self, problem, n_samples, **kwargs):
+        X = np.zeros((n_samples, problem.n_var), dtype=int)
+        for i in range(problem.n_var):
+            X[:, i] = np.random.randint(problem.xl[i], problem.xu[i] + 1, size=n_samples)
+            
+        # Восстанавливаем ограничение по сумме через FleetSizeRepair
+        repair = FleetSizeRepair(n_max=getattr(problem, "n_max", N_MAX))
+        return repair._do(problem, X, **kwargs)
 
 
 # ─── Постановка задачи оптимизации в терминах pymoo ──────────────────────────
@@ -65,7 +126,7 @@ class TramFleetProblem(ElementwiseProblem):
     
     Переменные решения (x):
         Вектор [n_20, n_48, n_55] из целых чисел.
-        Каждая переменная ограничена снизу 0, сверху — контрактным лимитом.
+        Каждая переменная ограничена снизу 5, сверху — контрактным лимитом.
         
     Целевые функции (F):
         pymoo всегда МИНИМИЗИРУЕТ целевые функции. Поэтому:
@@ -88,12 +149,15 @@ class TramFleetProblem(ElementwiseProblem):
             n_var=N_ROUTES,                     # 3 переменные (по одной на маршрут)
             n_obj=2,                            # 2 целевые функции (интервал и выручка)
             n_ieq_constr=1,                     # 1 ограничение (общий размер парка)
-            xl=np.full(N_ROUTES, 0),            # Нижние границы (минимум 0 трамваев)
+            xl=np.full(N_ROUTES, 5),            # Нижние границы (минимум 5 трамваев)
             xu=MAX_PER_ROUTE_MAP,               # Верхние границы (контрактные максимумы)
             vtype=int,                          # Тип переменных — целые числа
             runner=runner,
         )
         self.n_max = n_max
+        import threading
+        self._lock = threading.Lock()
+        self.evaluated_history = []
 
     def _evaluate(self, x, out, *args, **kwargs):
         """
@@ -102,7 +166,25 @@ class TramFleetProblem(ElementwiseProblem):
         :param x: Массив/вектор с количеством трамваев: [n_20, n_48, n_55].
         :param out: Словарь для записи вычисленных значений целей (F) и ограничений (G).
         """
-        tram_counts = [int(v) for v in x]
+        # Округляем значения и приводим к целым числам
+        tram_counts = [int(np.round(v)) for v in x]
+        
+        # Гарантируем соблюдение индивидуальных границ
+        for i in range(len(tram_counts)):
+            tram_counts[i] = int(np.clip(tram_counts[i], self.xl[i], self.xu[i]))
+            
+        # Ремонтируем ограничение на общий размер парка (sum(x) <= n_max)
+        while sum(tram_counts) > self.n_max:
+            available_indices = [idx for idx in range(len(tram_counts)) if tram_counts[idx] > self.xl[idx]]
+            if not available_indices:
+                break
+            # Уменьшаем на маршруте с наибольшим количеством трамваев
+            idx_to_decrease = max(available_indices, key=lambda idx: tram_counts[idx])
+            tram_counts[idx_to_decrease] -= 1
+            
+        # Записываем исправленные значения обратно в x, чтобы обновить особь в популяции
+        for i in range(len(x)):
+            x[i] = tram_counts[i]
 
         # Инициализируем многомаршрутную симуляцию с заданным распределением парка
         sim = MultiRouteSimulation.from_params(
@@ -122,6 +204,16 @@ class TramFleetProblem(ElementwiseProblem):
         out["F"] = np.array([headway_mae, -marginal_profit], dtype=float)
         # Формируем ограничение на вместимость парка (сумма ТС - лимит <= 0)
         out["G"] = np.array([sum(tram_counts) - self.n_max], dtype=float)
+
+        # Сохраняем в историю в потокобезопасном режиме
+        with self._lock:
+            self.evaluated_history.append({
+                "n_20": tram_counts[0],
+                "n_48": tram_counts[1],
+                "n_55": tram_counts[2],
+                "headway_mae_min": headway_mae,
+                "marginal_profit": marginal_profit,
+            })
 
         # Явно освобождаем память от объекта симуляции
         del sim
@@ -160,12 +252,12 @@ def run_nsga2(
     # Создаем объект задачи оптимизации
     problem = TramFleetProblem(n_max=n_max, runner=runner)
 
-    # Инициализируем алгоритм NSGA-II с операторами для целочисленного кодирования
+    # Инициализируем алгоритм NSGA-II с операторами для целочисленного кодирования и соблюдения лимита парка
     algorithm = NSGA2(
         pop_size=pop_size,                      # Число особей (вариантов распределения) в популяции
-        sampling=IntegerRandomSampling(),      # Целочисленная случайная начальная популяция
-        crossover=SBX(prob=0.9, eta=15, vtype=float, repair=RoundingRepair()), # Скрещивание с округлением
-        mutation=PM(eta=20, vtype=float, repair=RoundingRepair()),             # Мутация с округлением
+        sampling=FleetSampling(),              # Случайная начальная популяция с ограничением n_max
+        crossover=SBX(prob=0.9, eta=15, vtype=float, repair=FleetSizeRepair(n_max=n_max)), # Скрещивание с ремонтом n_max
+        mutation=PM(eta=20, vtype=float, repair=FleetSizeRepair(n_max=n_max)),             # Мутация с ремонтом n_max
         eliminate_duplicates=True,             # Исключение одинаковых решений в популяции
     )
 
@@ -228,13 +320,25 @@ def _save_results(res, out_dir: str):
     print(f"\nPareto-фронт сохранён: {csv_path}")
     print(df.to_string(index=False))
 
+    # Сохраняем все рассмотренные варианты (из истории оценок)
+    problem = res.problem
+    if hasattr(problem, "evaluated_history") and problem.evaluated_history:
+        df_all = pd.DataFrame(problem.evaluated_history)
+        # Удаляем дубликаты по конфигурации распределения парка
+        df_all = df_all.drop_duplicates(subset=["n_20", "n_48", "n_55"])
+        df_all["total_trams"] = df_all[["n_20", "n_48", "n_55"]].sum(axis=1)
+        df_all = df_all.sort_values("marginal_profit", ascending=False)
+        all_csv_path = os.path.join(out_dir, "all_evaluated.csv")
+        df_all.to_csv(all_csv_path, index=False)
+        print(f"Все рассмотренные варианты сохранены: {all_csv_path}")
+
     # Пытаемся построить графики Парето-фронта
     plots_dir = os.path.join(out_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
 
     try:
         from plot_pareto import plot_pareto
-        plot_pareto(csv_path=csv_path, out_dir=plots_dir)
+        plot_pareto(csv_path=csv_path, out_dir=plots_dir, n_max=getattr(problem, "n_max", None))
     except Exception as e:
         print(f"Ошибка при построении графиков Парето: {e}")
 
@@ -243,4 +347,4 @@ def _save_results(res, out_dir: str):
 
 if __name__ == "__main__":
     # Тестовый прогон на 60 трамваев с увеличенными параметрами для получения богатого Парето-фронта
-    run_nsga2(n_max=60, pop_size=40, n_gen=15)
+    run_nsga2(n_max=60, pop_size=30, n_gen=15)

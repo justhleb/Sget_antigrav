@@ -115,8 +115,8 @@
       0
     ]
   ],
-  "depot_to_first_stop": 8,
-  "min_rest_time": 15,
+  "depot_to_first_stop": 0,
+  "min_rest_time": 3,
   "road_loads": [
     [
       0,
@@ -157,15 +157,16 @@
   ],
   "tram_count": 16,
   "simulation_hours": 24,
-  "acceleration_time": 0.5,
+  "acceleration_time": 0.16666666666666666,
   "stop_time": 0.25,
   "turnaround_time": 2.0,
   "target_utilization": 0.75,
   "random_seed": 42,
   "contract_revenue_per_km": 529.5,
-  "energy_per_km": 9.44,
-  "maintenance_per_km": 0.0,
-  "depreciation_per_km": 19.79,
+  "energy_per_trip": 318.0,
+  "depreciation_per_trip": 667.0,
   "payroll_per_trip": 376.0,
-  "maintenance_fixed_per_trip": 116.0
+  "maintenance_per_trip": 116.0,
+  "passengers_per_km": 3.35,
+  "revenue_per_km": 108.62
 }

@@ -393,14 +393,14 @@ class TramVisualization:
 
 def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
     """
-    Отрисовывает красивый и современный сводный финансовый дашборд (Выручка, OpEx, Маржинальная прибыль, ROS).
+    Отрисовывает красивый и современный сводный финансовый дашборд (Выручка, OpEx, Опер. результат, ROS).
     Применяет стильную, гармоничную цветовую схему, закругленные углы, аккуратные сетки и Inter-подобный шрифт.
     
     Дашборд включает:
-    1. Верхнюю панель с 5 основными KPI карточками (выручка, расходы, прибыль, прибыль/км, ROS).
+    1. Верхнюю панель с 5 основными KPI карточками (выручка, расходы, прибыль, выручка/км, ROS).
     2. График сравнения Выручки и Операционных затрат (OpEx) по маршрутам.
-    3. Горизонтальную диаграмму маржинальной прибыли с подсветкой убытков красным цветом.
-    4. Столбчатую диаграмму удельной маржинальной прибыли на 1 км пробега.
+    3. Горизонтальную диаграмму опер. результата с подсветкой убытков красным цветом.
+    4. Столбчатую диаграмму удельного опер. результата на 1 км пробега.
     5. Столбчатую диаграмму рентабельности продаж (ROS, %).
 
     :param stats: Словарь с глобальной и помаршрутной статистикой симуляции.
@@ -483,8 +483,8 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
     kpis = [
         ("Выручка",            g.get("total_revenue", 0),       "₽", C_REVENUE),
         ("OpEx",               g.get("opex", 0),                "₽", C_OPEX),
-        ("Марж. прибыль",      g.get("marginal_profit", 0),     "₽", C_MARGIN),
-        ("Прибыль / км",       g.get("profit_per_km", 0),       "₽/км", C_PROFKM),
+        ("Опер. результат",    g.get("marginal_profit", 0),     "₽", C_MARGIN),
+        ("Выручка/км",         g.get("profit_per_km", 0),       "₽/км", C_PROFKM),
         ("ROS",                g.get("ros_pct", 0),             "%", C_ROS),
     ]
 
@@ -549,7 +549,7 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
         spine.set_visible(False)
     ax1.tick_params(colors=C_MUTED, length=0)
 
-    # ── ROW 1: Маржинальная прибыль (горизонтальные бары) ───────────────────
+    # ── ROW 1: Опер. результат (горизонтальные бары) ───────────────────
     ax2 = fig.add_subplot(gs[1, 1], facecolor=C_BG)
     margins = [route_nums[l]["marginal_profit"] for l in labels]
     # Подсвечиваем убыточные направления красным, прибыльные — синим
@@ -563,7 +563,7 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
                  f"{val:,.0f} ₽", ha="left" if val >= 0 else "right",
                  va="center", fontsize=9, color=C_TEXT, **inter_props)
     ax2.axvline(0, color=C_MUTED, linewidth=0.8)
-    ax2.set_title("Маржинальная прибыль", fontsize=13, color=C_TEXT, pad=12, **inter_props)
+    ax2.set_title("Опер. результат", fontsize=13, color=C_TEXT, pad=12, **inter_props)
     ax2.grid(axis="x", color=C_GRID, linewidth=0.7)
     ax2.set_axisbelow(True)
     for spine in ax2.spines.values():
@@ -587,7 +587,7 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
     ax3.set_xticks(x)
     ax3.set_xticklabels([f"Маршрут {l}" for l in labels], **inter_props)
     ax3.set_ylabel("₽/км", color=C_MUTED, **inter_props)
-    ax3.set_title("Удельная маржинальная прибыль на км", fontsize=13, color=C_TEXT, pad=12, **inter_props)
+    ax3.set_title("Удельный опер. результат на км", fontsize=13, color=C_TEXT, pad=12, **inter_props)
     ax3.axhline(0, color=C_MUTED, linewidth=0.8)
     ax3.grid(axis="y", color=C_GRID, linewidth=0.7)
     ax3.set_axisbelow(True)

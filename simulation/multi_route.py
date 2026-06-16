@@ -27,11 +27,11 @@ from models.route import Route, RouteConfig
 from models.tram import Tram
 from logger import TramLogger
 from visualization import TramVisualization
-from data_sensors.excel_parser import load_route_economics
 from constants import (
     OUTPUT_DIR,
     MIN_REST_TIME,
     DEFAULT_STOP_DWELL_MIN,
+    FIRST_TRIP_DEPARTURE_MIN,
 )
 
 log = logging.getLogger(__name__)
@@ -167,13 +167,16 @@ class TramPair:
         Для каждого вагона фиксируется расчетное плановое время выпуска для 
         контроля отклонений (Type 1 штрафы).
         """
+        # Ожидаем начала утренней смены (5:30)
+        yield self.env.timeout(FIRST_TRIP_DEPARTURE_MIN)
+
         for i, tram in enumerate(self.all_trams):
             if i > 0:
                 interval = self._get_target_interval(self.env.now)
                 target_time = self.env.now + interval
                 yield self.env.timeout(interval)
             else:
-                target_time = 0.0
+                target_time = FIRST_TRIP_DEPARTURE_MIN
 
             tram.target_release_time = target_time
             tram.actual_release_time = self.env.now
@@ -309,8 +312,6 @@ class MultiRouteSimulation:
         else:
             self.run_dir = self._create_run_directory()
 
-        # ── Загрузка экономических нормативов из Excel ─────────────────────────
-        self.route_economics = load_route_economics()
 
         # ── Загрузка конфигурации штрафов ──────────────────────────────────────
         import json
@@ -352,23 +353,12 @@ class MultiRouteSimulation:
             fwd_cfg.penalties_config = self.penalties_config
             bwd_cfg.penalties_config = self.penalties_config
 
-            # Инжектируем экономические показатели, рассчитанные из отчетов Excel
-            econ = self.route_economics.get(route_num)
-            if econ is not None:
-                fwd_cfg.revenue_per_km    = econ.mean_revenue_per_km
-                fwd_cfg.passengers_per_km = econ.mean_passengers_per_km
-                bwd_cfg.revenue_per_km    = econ.mean_revenue_per_km
-                bwd_cfg.passengers_per_km = econ.mean_passengers_per_km
-                log.info(
-                    f"Маршрут {route_num}: "
-                    f"revenue/km={econ.mean_revenue_per_km:.2f}, "
-                    f"pax/km={econ.mean_passengers_per_km:.2f}"
-                )
-            else:
-                log.warning(
-                    f"Маршрут {route_num}: нет экономических данных — "
-                    f"revenue_per_km и passengers_per_km будут = 0"
-                )
+            # Логируем экономические показатели маршрута
+            log.info(
+                f"Маршрут {route_num}: "
+                f"revenue/km={fwd_cfg.revenue_per_km:.2f}, "
+                f"pax/km={fwd_cfg.passengers_per_km:.2f}"
+            )
 
             # Регистрируем остановки маршрута в глобальном словаре
             self._register_stops(fwd_cfg)
@@ -495,7 +485,10 @@ class MultiRouteSimulation:
         for pair in self.pairs:
             pair.start()
 
-        self.env.run(until=self._max_hours() * 60)
+        # Запускаем симуляцию с запасом времени до 30 часов, чтобы все запущенные
+        # трамваи успели закончить свои рейсы и вернуться в депо. Симуляция остановится
+        # автоматически раньше, как только на линии не останется активных событий.
+        self.env.run(until=30 * 60)
         stats = self.get_full_stats()
         summary_text = self.generate_summary_text(stats)
         self._print_stats(summary_text)
@@ -513,7 +506,7 @@ class MultiRouteSimulation:
                 writer.writerow([
                     "Объект", "Пассажиры (расчет)", "Трамвай-км", "Рейсы", "Трамваев",
                     "Совокупный Доход", "Пассажирский Доход", "Контрактный Доход", 
-                    "OpEx", "Маржинальная Прибыль", "Прибыль/км", "ROS %", "MAE интервалов",
+                    "OpEx", "Маржинальная Прибыль", "Выручка/км", "ROS %", "MAE интервалов",
                     "Невыполненные рейсы (выпуск)", "Рейсы с откл. середина", "Потерянный контракт", "Штрафы",
                     "Успешные рейсы", "Контрактные рейсы", "% Выполнения контракта"
                 ])
@@ -675,9 +668,13 @@ class MultiRouteSimulation:
                 r_pax_rev = route.stats.total_passenger_revenue
                 r_cnt_rev = route.stats.total_contract_revenue
 
-                cost_per_km = cfg.energy_per_km + cfg.maintenance_per_km + cfg.depreciation_per_km
-                cost_per_trip = cfg.payroll_per_trip + cfg.maintenance_fixed_per_trip
-                opex = (r_km * cost_per_km) + (r_trips * cost_per_trip)
+                cost_per_trip = (
+                    cfg.payroll_per_trip
+                    + cfg.maintenance_per_trip
+                    + cfg.energy_per_trip
+                    + cfg.depreciation_per_trip
+                )
+                opex = r_trips * cost_per_trip
                 marginal_profit = r_rev - opex
                 profit_per_km = marginal_profit / r_km if r_km > 0 else 0.0
                 ros = (marginal_profit / r_rev * 100) if r_rev > 0 else 0.0
@@ -853,12 +850,12 @@ class MultiRouteSimulation:
                     lines.append(f"  • Трамвай-км:          {rs['tram_km']:.1f}")
                     lines.append(f"  • Рейсов:             {rs['total_trips']}")
                     lines.append(f"  • Трамваев на маршруте:  {rs['trams_count']}")
-                    lines.append(f"  • Совокупный Доход:    {rs['revenue']:.0f} руб.")
-                    lines.append(f"    - Пассажиры:         {rs['passenger_revenue']:.0f} руб.")
-                    lines.append(f"    - Контракт:          {rs['contract_revenue']:.0f} руб.")
+                    lines.append(f"  • Общая выручка:       {rs['revenue']:.0f} руб.")
+                    lines.append(f"    - Выручка с пассажиров: {rs['passenger_revenue']:.0f} руб.")
+                    lines.append(f"    - Выручка по контракту: {rs['contract_revenue']:.0f} руб.")
                     lines.append(f"  • OpEx:                {rs['opex']:.0f} руб.")
-                    lines.append(f"  • Марж. прибыль:      {rs['marginal_profit']:.0f} руб.")
-                    lines.append(f"  • Прибыль/км:          {rs['profit_per_km']:.2f} руб.")
+                    lines.append(f"  • Опер. результат:      {rs['marginal_profit']:.0f} руб.")
+                    lines.append(f"  • Выручка/км:          {rs['profit_per_km']:.2f} руб.")
                     lines.append(f"  • ROS:                 {rs['ros_pct']:.1f}%")
                     lines.append(f"  • MAE интервалов:     {rs['headway_mae_min']:.2f} мин")
             
@@ -868,48 +865,42 @@ class MultiRouteSimulation:
                 lines.append(f"  • Пассажиры (расчёт):  {rt['passengers_estimated']:.0f}")
                 lines.append(f"  • Трамвай-км:          {rt['tram_km']:.1f}")
                 lines.append(f"  • Рейсов:             {rt['total_trips']}")
-                lines.append(f"  • Успешных рейсов:    {rt['successful_trips']}")
-                lines.append(f"  • Контрактных рейсов:  {rt['contract_trips']}")
-                lines.append(f"  • Процент выполнения контракта: {rt['contract_completion_pct']:.1f}%")
-                lines.append(f"  • Невыполненных рейсов (выпуск): {rt['failed_release_trips']} (потери контракта: {rt['lost_contract_revenue']:.0f} руб.)")
                 lines.append(f"  • Рейсов с отклонением на серединной: {rt['failed_midpoint_trips']}")
+                lines.append(f"  • Контрактных рейсов:  {rt['contract_trips']}")
+                lines.append(f"  • Невыполненных рейсов (выпуск): {rt['failed_release_trips']} (потери контракта: {rt['lost_contract_revenue']:.0f} руб.)")
                 lines.append(f"  • Трамваев на маршруте:  {rt['trams_count']}")
-                lines.append(f"  • Совокупный Доход:    {rt['revenue']:.0f} руб.")
-                lines.append(f"    - Пассажиры:         {rt['passenger_revenue']:.0f} руб.")
-                lines.append(f"    - Контракт:          {rt['contract_revenue']:.0f} руб.")
+                lines.append(f"  • Общая выручка:       {rt['revenue']:.0f} руб.")
+                lines.append(f"    - Выручка с пассажиров: {rt['passenger_revenue']:.0f} руб.")
+                lines.append(f"    - Выручка по контракту: {rt['contract_revenue']:.0f} руб.")
                 lines.append(f"  • OpEx:                {rt['opex']:.0f} руб.")
                 if rt.get('total_penalties', 0) > 0:
                     lines.append(f"  • Штрафы за несоблюдение выпуска: {rt['release_penalty']:.0f} руб.")
                     lines.append(f"  • Штрафы за серединные отклонения: {rt['midpoint_penalty']:.0f} руб.")
                     lines.append(f"  • Всего штрафов:      {rt['total_penalties']:.0f} руб.")
-                lines.append(f"  • Марж. прибыль:      {rt['marginal_profit']:.0f} руб.")
-                lines.append(f"  • Прибыль/км:          {rt['profit_per_km']:.2f} руб.")
+                lines.append(f"  • Опер. результат:      {rt['marginal_profit']:.0f} руб.")
+                lines.append(f"  • Выручка/км:          {rt['profit_per_km']:.2f} руб.")
                 lines.append(f"  • ROS:                 {rt['ros_pct']:.1f}%")
                 lines.append(f"  • MAE интервалов:     {rt['headway_mae_min']:.2f} мин")
                 
         g = stats["global"]
         lines.append(f"\nГлобально:")
         lines.append(f"  • Всего трамвай-км:   {g['total_tram_km']:.1f}")
-        lines.append(f"  • Всего рейсов:      {g['total_trips']}")
-        lines.append(f"  • Всего успешных рейсов: {g['successful_trips']}")
-        lines.append(f"  • Всего контрактных рейсов: {g['contract_trips']}")
-        lines.append(f"  • Глобальный процент выполнения контракта: {g['contract_completion_pct']:.1f}%")
-        lines.append(f"  • Всего невыполненных рейсов: {g['failed_release_trips']} (всего потери контракта: {g['lost_contract_revenue']:.0f} руб.)")
+        lines.append(f"  • Всего рейсов выполнено: {g['total_trips']}")
         lines.append(f"  • Всего рейсов с отклонением на серединной: {g['failed_midpoint_trips']}")
+        lines.append(f"  • Всего контрактных рейсов: {g['contract_trips']}")
         lines.append(f"  • Всего трамваев:      {g['total_trams']}")
-        lines.append(f"  • Всего доход:       {g['total_revenue']:.0f} руб.")
-        lines.append(f"    - Пассажиры:       {g['total_passenger_revenue']:.0f} руб.")
-        lines.append(f"    - Контракт:        {g['total_contract_revenue']:.0f} руб.")
+        lines.append(f"  • Общая выручка:       {g['total_revenue']:.0f} руб.")
+        lines.append(f"    - Выручка с пассажиров: {g['total_passenger_revenue']:.0f} руб.")
+        lines.append(f"    - Выручка по контракту: {g['total_contract_revenue']:.0f} руб.")
         lines.append(f"  • Всего OpEx:        {g['opex']:.0f} руб.")
         if g.get('total_penalties', 0) > 0:
             lines.append(f"  • Всего штрафов за выпуск: {g['release_penalty']:.0f} руб.")
-            lines.append(f"  • Всего штрафов за серединные: {g['midpoint_penalty']:.0f} руб.")
+            lines.append(f"  • Всего штрафов за нарушение интервалов: {g['midpoint_penalty']:.0f} руб.")
             lines.append(f"  • Всего штрафов:      {g['total_penalties']:.0f} руб.")
-        lines.append(f"  • Марж. прибыль:     {g['marginal_profit']:.0f} руб.")
-        lines.append(f"  • Прибыль/км:        {g['profit_per_km']:.2f} руб.")
+        lines.append(f"  • Опер. результат:     {g['marginal_profit']:.0f} руб.")
+        lines.append(f"  • Выручка/км:        {g['profit_per_km']:.2f} руб.")
         lines.append(f"  • ROS:               {g['ros_pct']:.1f}%")
         lines.append(f"  • Пассажиры (расч.): {g['total_passengers_est']:.0f}")
-        lines.append(f"  • Unique stops:      {g['unique_stops']}")
         lines.append(f"  • MAE интервалов:     {g['headway_mae_min']:.2f} мин")
         lines.append(f"{'='*60}\n")
         

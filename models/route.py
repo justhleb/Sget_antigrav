@@ -62,26 +62,25 @@ class RouteConfig:
     distances: Dict[int, float]    # Расстояния до остановок от начала маршрута (в метрах)
     road_loads: Dict[int, float]   # Коэффициенты загрузки дорог по часам (fallback, если нет road_load.json)
     distances_list: List[float] = field(default_factory=list) # Массив расстояний между соседними остановками (в метрах)
-    depot_to_first_stop: float = 8.0 # Время выезда из депо до 1-й остановки (в минутах)
-    min_rest_time: float = 15.0     # Минимальное время отдыха водителя на конечной станции (в минутах)
+    depot_to_first_stop: float = 0.0 # Время выезда из депо до 1-й остановки (в минутах)
+    min_rest_time: float = 3.0      # Минимальное время отдыха водителя на конечной станции (в минутах)
     turnaround_time: float = DEFAULT_TURNAROUND # Время разворота на конечном кольце (в минутах)
-    acceleration_time: float = 0.5   # Время разгона и торможения на каждой остановке (в минутах)
-    stop_time: float = 1.0          # Время стоянки на остановке по умолчанию (устарело, dwell_time фиксирован на 0.75 мин)
+    acceleration_time: float = 10.0 / 60.0 # Время разгона и торможения на каждой остановке (в минутах)
+    stop_time: float = 1.0          # Время стоянки на остановке по умолчанию (устарело, dwell_time фиксирован на 0.5 мин)
     random_seed: Optional[int] = None # Сид для воспроизводимости случайных величин
     target_intervals: Optional[Dict[str, Dict[str, int]]] = None # Целевые интервалы по часам из target_intervals/
     penalties_config: dict = field(default_factory=dict) # Настройки штрафов и допусков из penalties_config.json
     
-    # ── Экономические нормативы (вычисляются динамически на базе Excel-отчетов) ──
+    # ── Экономические нормативы (считываются из JSON) ──
     revenue_per_km: float = 0.0       # руб. Средний исторический доход от пассажиров на 1 км пути
     passengers_per_km: float = 0.0    # чел. Среднее историческое число пассажиров на 1 км пути
     
     # ── Расходные и доходные параметры контракта (считываются из JSON) ──
     contract_revenue_per_km: float = 529.5 # руб/км. Тариф оплаты транспортной работы по брутто-контракту
-    energy_per_km: float = 0.0              # руб/км. Расход электроэнергии подвижным составом
-    maintenance_per_km: float = 0.0         # руб/км. Пробежная стоимость ТОиР (по умолчанию 0.0)
-    depreciation_per_km: float = 0.0        # руб/км. Амортизационные отчисления на вагон
+    energy_per_trip: float = 0.0            # руб/рейс. Расход электроэнергии на один рейс
+    depreciation_per_trip: float = 0.0      # руб/рейс. Амортизационные отчисления за рейс
     payroll_per_trip: float = 0.0            # руб/рейс. ФОТ водителя за один выполненный рейс (полурейс)
-    maintenance_fixed_per_trip: float = 0.0  # руб/рейс. Фиксированный платеж за ТОиР вагона за рейс
+    maintenance_per_trip: float = 0.0        # руб/рейс. Платеж за ТОиР вагона за рейс
     tram_count: Optional[int] = None        # Требуемое контрактное количество трамваев на маршруте
 
     @property
@@ -136,21 +135,22 @@ class RouteConfig:
             distances=distances,
             road_loads=road_loads,
             distances_list=distances_list,
-            depot_to_first_stop=c.get("depot_to_first_stop", 8.0),
-            min_rest_time=c.get("min_rest_time", 15.0),
+            depot_to_first_stop=c.get("depot_to_first_stop", 0.0),
+            min_rest_time=c.get("min_rest_time", 3.0),
             turnaround_time=c.get("turnaround_time", DEFAULT_TURNAROUND),
-            acceleration_time=c.get("acceleration_time", 0.5),
+            acceleration_time=c.get("acceleration_time", 10.0 / 60.0),
             stop_time=c.get("stop_time", 1.0),
             random_seed=c.get("random_seed"),
             target_intervals=target_intervals,
             penalties_config=c.get("penalties_config", {}),
             contract_revenue_per_km=c.get("contract_revenue_per_km", 529.5),
-            energy_per_km=c.get("energy_per_km", 0.0),
-            maintenance_per_km=c.get("maintenance_per_km", 0.0),
-            depreciation_per_km=c.get("depreciation_per_km", 0.0),
+            energy_per_trip=c.get("energy_per_trip", 0.0),
+            depreciation_per_trip=c.get("depreciation_per_trip", 0.0),
             payroll_per_trip=c.get("payroll_per_trip", 0.0),
-            maintenance_fixed_per_trip=c.get("maintenance_fixed_per_trip", 0.0),
+            maintenance_per_trip=c.get("maintenance_per_trip", 0.0),
             tram_count=c.get("tram_count"),
+            revenue_per_km=c.get("revenue_per_km", 0.0),
+            passengers_per_km=c.get("passengers_per_km", 0.0),
         )
 class Route:
     """
@@ -230,7 +230,7 @@ class Route:
         
         Скорость движения вычисляется как: базовая_скорость * коэффициент_загрузки * случайная_флуктуация.
         К итоговому времени движения прибавляется время на разгон и торможение, а также 
-        случайная задержка на светофорах с вероятностью 30%.
+        случайная задержка на светофорах с вероятностью 10%.
         
         :param distance: Расстояние между остановками в метрах.
         :param t_min: Текущее модельное время в минутах.
@@ -244,8 +244,8 @@ class Route:
         base_time = (distance / 1000.0) * (60.0 / speed) + self.config.acceleration_time
         
         traffic_light_delay = 0.0
-        if random.random() < 0.30:
-            traffic_light_delay = random.expovariate(1.0 / 0.7)
+        if random.random() < 0.10:
+            traffic_light_delay = random.expovariate(1.0 / (20.0 / 60.0))
             
         return base_time + traffic_light_delay
 
@@ -258,10 +258,21 @@ class Route:
         Извлекает доступные трамваи из available_trams и запускает для каждого
         из них отдельный асинхронный процесс прогона по маршруту (_tram_run).
         """
+        from constants import LAST_TRIP_DEPARTURE_MIN
+        
         trip_id = 0
-        sim_end = self.config.simulation_hours * 60
-        while self.env.now < sim_end:
+        is_fwd = "fwd" in self.config.route_id
+        
+        # Для fwd ограничиваем выпуск до 23:30 (LAST_TRIP_DEPARTURE_MIN).
+        # Для bwd разрешаем движение до конца работы (30 часов), чтобы все
+        # запущенные fwd-рейсы могли благополучно вернуться в депо.
+        limit_time = LAST_TRIP_DEPARTURE_MIN if is_fwd else 30 * 60
+        
+        while self.env.now < limit_time:
             tram = yield self.available_trams.get()
+            if self.env.now >= limit_time:
+                yield self.available_trams.put(tram)
+                break
             trip_id += 1
             log.info(
                 f"[{self.env.now:.1f}] Маршрут {self.config.route_id}: "
@@ -373,7 +384,7 @@ class Route:
         """
         SimPy-процесс: Обработка прибытия трамвая на остановку.
         
-        Трамвай стоит на остановке фиксированное время dwell_time (0.75 минуты),
+        Трамвай стоит на остановке фиксированное время dwell_time (0.5 минуты),
         а также вычисляются отклонения от целевого интервала движения (headway error).
         Если на серединной остановке отклонение превышает допустимый лимит (Type 2),
         рейс отмечается как неуспешный.
