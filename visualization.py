@@ -3,7 +3,7 @@
 
 Этот модуль отвечает за построение наглядных графиков по итогам работы симуляции:
 1. Графиков качества движения (ошибки интервалов по часам, по остановкам, тепловая карта).
-2. Сводного финансового дашборда для оценки экономической эффективности маршрутов (выручка, расходы, маржинальность, ROS).
+2. Сводного финансового дашборда для оценки экономической эффективности маршрутов (выручка, расходы, маржинальность, CMR).
 
 Для построения используется библиотека matplotlib.
 """
@@ -393,15 +393,15 @@ class TramVisualization:
 
 def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
     """
-    Отрисовывает красивый и современный сводный финансовый дашборд (Выручка, OpEx, Опер. результат, ROS).
+    Отрисовывает красивый и современный сводный финансовый дашборд (Выручка, VarEx, Опер. результат, CMR).
     Применяет стильную, гармоничную цветовую схему, закругленные углы, аккуратные сетки и Inter-подобный шрифт.
     
     Дашборд включает:
-    1. Верхнюю панель с 5 основными KPI карточками (выручка, расходы, прибыль, выручка/км, ROS).
-    2. График сравнения Выручки и Операционных затрат (OpEx) по маршрутам.
+    1. Верхнюю панель с 5 основными KPI карточками (выручка, расходы, прибыль, выручка/км, CMR).
+    2. График сравнения Выручки и Переменных затрат (VarEx) по маршрутам.
     3. Горизонтальную диаграмму опер. результата с подсветкой убытков красным цветом.
     4. Столбчатую диаграмму удельного опер. результата на 1 км пробега.
-    5. Столбчатую диаграмму рентабельности продаж (ROS, %).
+    5. Столбчатую диаграмму рентабельности продаж (CMR, %).
 
     :param stats: Словарь с глобальной и помаршрутной статистикой симуляции.
     :param output_file: Путь для сохранения итогового дашборда (PNG).
@@ -422,18 +422,18 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
         num = rid.split("_")[0]
         if num not in route_nums:
             route_nums[num] = {
-                "revenue": 0, "opex": 0, "marginal_profit": 0,
+                "revenue": 0, "varex": 0, "marginal_profit": 0,
                 "tram_km": 0, "total_trips": 0,
             }
         route_nums[num]["revenue"] += rs.get("revenue", 0)
-        route_nums[num]["opex"] += rs.get("opex", 0)
+        route_nums[num]["varex"] += rs.get("varex", 0)
         route_nums[num]["marginal_profit"] += rs.get("marginal_profit", 0)
         route_nums[num]["tram_km"] += rs.get("tram_km", 0)
         route_nums[num]["total_trips"] += rs.get("total_trips", 0)
 
     for num, d in route_nums.items():
         d["profit_per_km"] = d["marginal_profit"] / d["tram_km"] if d["tram_km"] > 0 else 0
-        d["ros_pct"] = (d["marginal_profit"] / d["revenue"] * 100) if d["revenue"] > 0 else 0
+        d["cmr_pct"] = (d["marginal_profit"] / d["revenue"] * 100) if d["revenue"] > 0 else 0
 
     labels = sorted(route_nums.keys())
     if not labels:
@@ -457,12 +457,12 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
     C_MUTED    = "#8C8C8C"   # Приглушенный серый
     C_GRID     = "#E8E8E8"   # Ненавязчивые линии сетки
     C_REVENUE  = "#34A853"   # Изумрудный зеленый (выручка)
-    C_OPEX     = "#EA4335"   # Коралловый красный (расходы/убытки)
+    C_VAREX    = "#EA4335"   # Коралловый красный (расходы/убытки)
     C_MARGIN   = "#4285F4"   # Спокойный синий (прибыль)
-    C_ROS      = "#FBBC05"   # Солнечный желтый (рентабельность)
+    C_CMR      = "#FBBC05"   # Солнечный желтый (рентабельность)
     C_PROFKM   = "#7B61FF"   # Мягкий фиолетовый (прибыль на км)
     C_BAR_REV  = "#34A853"
-    C_BAR_OPEX = "#EA4335"
+    C_BAR_VAREX = "#EA4335"
 
     # ── Layout: Сетка из 3 строк × 2 колонок ─────────────────────────────────
     fig = plt.figure(figsize=(16, 14), facecolor=C_BG)
@@ -482,10 +482,10 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
     g = global_stats
     kpis = [
         ("Выручка",            g.get("total_revenue", 0),       "₽", C_REVENUE),
-        ("OpEx",               g.get("opex", 0),                "₽", C_OPEX),
+        ("VarEx",              g.get("varex", 0),               "₽", C_VAREX),
         ("Опер. результат",    g.get("marginal_profit", 0),     "₽", C_MARGIN),
         ("Выручка/км",         g.get("profit_per_km", 0),       "₽/км", C_PROFKM),
-        ("ROS",                g.get("ros_pct", 0),             "%", C_ROS),
+        ("CMR",                g.get("cmr_pct", 0),             "%", C_CMR),
     ]
 
     card_w = 1.0 / len(kpis)
@@ -526,13 +526,13 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
     x = np.arange(len(labels))
     w = 0.35
     revs = [route_nums[l]["revenue"] for l in labels]
-    opexs = [route_nums[l]["opex"] for l in labels]
+    varexs = [route_nums[l]["varex"] for l in labels]
 
-    ax1.bar(x - w/2, revs,  w, color=C_BAR_REV,  alpha=0.85, label="Выручка", edgecolor="none")
-    ax1.bar(x + w/2, opexs, w, color=C_BAR_OPEX, alpha=0.85, label="OpEx",    edgecolor="none")
+    ax1.bar(x - w/2, revs,  w, color=C_BAR_REV,   alpha=0.85, label="Выручка", edgecolor="none")
+    ax1.bar(x + w/2, varexs, w, color=C_BAR_VAREX, alpha=0.85, label="VarEx",   edgecolor="none")
 
     # Подписи значений непосредственно над каждым столбцом
-    for xi, (rv, ox) in enumerate(zip(revs, opexs)):
+    for xi, (rv, ox) in enumerate(zip(revs, varexs)):
         ax1.text(xi - w/2, rv + rv * 0.01, f"{rv:,.0f}", ha="center", va="bottom",
                  fontsize=8, color=C_TEXT, **inter_props)
         ax1.text(xi + w/2, ox + ox * 0.01, f"{ox:,.0f}", ha="center", va="bottom",
@@ -541,7 +541,7 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
     ax1.set_xticks(x)
     ax1.set_xticklabels([f"Маршрут {l}" for l in labels], **inter_props)
     ax1.set_ylabel("руб.", color=C_MUTED, **inter_props)
-    ax1.set_title("Выручка vs OpEx", fontsize=13, color=C_TEXT, pad=12, **inter_props)
+    ax1.set_title("Выручка vs VarEx", fontsize=13, color=C_TEXT, pad=12, **inter_props)
     ax1.legend(frameon=False, fontsize=9)
     ax1.grid(axis="y", color=C_GRID, linewidth=0.7)
     ax1.set_axisbelow(True)
@@ -553,7 +553,7 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
     ax2 = fig.add_subplot(gs[1, 1], facecolor=C_BG)
     margins = [route_nums[l]["marginal_profit"] for l in labels]
     # Подсвечиваем убыточные направления красным, прибыльные — синим
-    bar_colors = [C_MARGIN if m >= 0 else C_OPEX for m in margins]
+    bar_colors = [C_MARGIN if m >= 0 else C_VAREX for m in margins]
     bars2 = ax2.barh([f"Маршрут {l}" for l in labels], margins, color=bar_colors, alpha=0.85, edgecolor="none", height=0.5)
     
     # Текстовые подписи сбоку от горизонтальных баров
@@ -573,7 +573,7 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
     # ── ROW 2: Удельная прибыль на 1 км пробега ──────────────────────────────
     ax3 = fig.add_subplot(gs[2, 0], facecolor=C_BG)
     ppkm = [route_nums[l]["profit_per_km"] for l in labels]
-    colors3 = [C_PROFKM if v >= 0 else C_OPEX for v in ppkm]
+    colors3 = [C_PROFKM if v >= 0 else C_VAREX for v in ppkm]
     bars3 = ax3.bar(x, ppkm, 0.5, color=colors3, alpha=0.85, edgecolor="none")
     for xi, val in enumerate(ppkm):
         ax3.text(xi, val + abs(val) * 0.02, f"{val:,.2f}", ha="center", va="bottom",
@@ -595,24 +595,24 @@ def plot_global_financial_summary(stats: dict, output_file: str | Path) -> Path:
         spine.set_visible(False)
     ax3.tick_params(colors=C_MUTED, length=0)
 
-    # ── ROW 2: ROS (Рентабельность продаж, %) ────────────────────────────────
+    # ── ROW 2: CMR (%) ────────────────────────────────
     ax4 = fig.add_subplot(gs[2, 1], facecolor=C_BG)
-    ross = [route_nums[l]["ros_pct"] for l in labels]
-    colors4 = [C_ROS if v >= 0 else C_OPEX for v in ross]
-    bars4 = ax4.bar(x, ross, 0.5, color=colors4, alpha=0.85, edgecolor="none")
-    for xi, val in enumerate(ross):
+    cmrs = [route_nums[l]["cmr_pct"] for l in labels]
+    colors4 = [C_CMR if v >= 0 else C_VAREX for v in cmrs]
+    bars4 = ax4.bar(x, cmrs, 0.5, color=colors4, alpha=0.85, edgecolor="none")
+    for xi, val in enumerate(cmrs):
         ax4.text(xi, val + abs(val) * 0.02, f"{val:.1f}%", ha="center", va="bottom",
                  fontsize=9, color=C_TEXT, **inter_props)
     
     # Рисуем линию средней рентабельности по всей сети
-    avg_ros = g.get("ros_pct", 0)
-    ax4.axhline(avg_ros, color=C_MUTED, linestyle="--", linewidth=1, alpha=0.7)
-    ax4.text(len(labels) - 0.5, avg_ros, f"  ср. {avg_ros:.1f}%", fontsize=8,
+    avg_cmr = g.get("cmr_pct", 0)
+    ax4.axhline(avg_cmr, color=C_MUTED, linestyle="--", linewidth=1, alpha=0.7)
+    ax4.text(len(labels) - 0.5, avg_cmr, f"  ср. {avg_cmr:.1f}%", fontsize=8,
              va="bottom", color=C_MUTED, **inter_props)
     ax4.set_xticks(x)
     ax4.set_xticklabels([f"Маршрут {l}" for l in labels], **inter_props)
     ax4.set_ylabel("%", color=C_MUTED, **inter_props)
-    ax4.set_title("ROS (Рентабельность продаж)", fontsize=13, color=C_TEXT, pad=12, **inter_props)
+    ax4.set_title("CMR (%)", fontsize=13, color=C_TEXT, pad=12, **inter_props)
     ax4.axhline(0, color=C_MUTED, linewidth=0.8)
     ax4.grid(axis="y", color=C_GRID, linewidth=0.7)
     ax4.set_axisbelow(True)

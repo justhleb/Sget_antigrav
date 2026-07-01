@@ -506,7 +506,7 @@ class MultiRouteSimulation:
                 writer.writerow([
                     "Объект", "Пассажиры (расчет)", "Трамвай-км", "Рейсы", "Трамваев",
                     "Совокупный Доход", "Пассажирский Доход", "Контрактный Доход", 
-                    "OpEx", "Маржинальная Прибыль", "Выручка/км", "ROS %", "MAE интервалов",
+                    "VarEx", "Опер. Результат", "Выручка/км", "CMR %", "MAE интервалов",
                     "Невыполненные рейсы (выпуск)", "Рейсы с откл. середина", "Потерянный контракт", "Штрафы",
                     "Успешные рейсы", "Контрактные рейсы", "% Выполнения контракта"
                 ])
@@ -519,8 +519,8 @@ class MultiRouteSimulation:
                             writer.writerow([
                                 rid, f"{rs['passengers_estimated']:.0f}", f"{rs['tram_km']:.1f}", str(rs['total_trips']), str(rs['trams_count']),
                                 f"{rs['revenue']:.0f}", f"{rs['passenger_revenue']:.0f}", f"{rs['contract_revenue']:.0f}",
-                                f"{rs['opex']:.0f}", f"{rs['marginal_profit']:.0f}", f"{rs['profit_per_km']:.2f}",
-                                f"{rs['ros_pct']:.1f}", f"{rs['headway_mae_min']:.2f}",
+                                f"{rs['varex']:.0f}", f"{rs['marginal_profit']:.0f}", f"{rs['profit_per_km']:.2f}",
+                                f"{rs['cmr_pct']:.1f}", f"{rs['headway_mae_min']:.2f}",
                                 str(rs.get('failed_release_trips', 0)), str(rs.get('failed_midpoint_trips', 0)), f"{rs.get('lost_contract_revenue', 0.0):.0f}", "0",
                                 str(rs['total_trips'] - rs.get('failed_release_trips', 0)), "0", "0.0"
                             ])
@@ -530,8 +530,8 @@ class MultiRouteSimulation:
                         writer.writerow([
                             f"{pair.route_num}_общий", f"{rt['passengers_estimated']:.0f}", f"{rt['tram_km']:.1f}", str(rt['total_trips']), str(rt['trams_count']),
                             f"{rt['revenue']:.0f}", f"{rt['passenger_revenue']:.0f}", f"{rt['contract_revenue']:.0f}",
-                            f"{rt['opex']:.0f}", f"{rt['marginal_profit']:.0f}", f"{rt['profit_per_km']:.2f}",
-                            f"{rt['ros_pct']:.1f}", f"{rt['headway_mae_min']:.2f}",
+                            f"{rt['varex']:.0f}", f"{rt['marginal_profit']:.0f}", f"{rt['profit_per_km']:.2f}",
+                            f"{rt['cmr_pct']:.1f}", f"{rt['headway_mae_min']:.2f}",
                             str(rt.get('failed_release_trips', 0)), str(rt.get('failed_midpoint_trips', 0)), f"{rt.get('lost_contract_revenue', 0.0):.0f}", f"{rt.get('total_penalties', 0.0):.0f}",
                             str(rt['successful_trips']), str(rt.get('contract_trips', 0)), f"{rt.get('contract_completion_pct', 0.0):.1f}"
                         ])
@@ -540,8 +540,8 @@ class MultiRouteSimulation:
                 writer.writerow([
                     "Глобально", f"{g['total_passengers_est']:.0f}", f"{g['total_tram_km']:.1f}", str(g['total_trips']), str(g['total_trams']),
                     f"{g['total_revenue']:.0f}", f"{g['total_passenger_revenue']:.0f}", f"{g['total_contract_revenue']:.0f}",
-                    f"{g['opex']:.0f}", f"{g['marginal_profit']:.0f}", f"{g['profit_per_km']:.2f}",
-                    f"{g['ros_pct']:.1f}", f"{g['headway_mae_min']:.2f}",
+                    f"{g['varex']:.0f}", f"{g['marginal_profit']:.0f}", f"{g['profit_per_km']:.2f}",
+                    f"{g['cmr_pct']:.1f}", f"{g['headway_mae_min']:.2f}",
                     str(g.get('failed_release_trips', 0)), str(g.get('failed_midpoint_trips', 0)), f"{g.get('lost_contract_revenue', 0.0):.0f}", f"{g.get('total_penalties', 0.0):.0f}",
                     str(g['successful_trips']), str(g.get('contract_trips', 0)), f"{g.get('contract_completion_pct', 0.0):.1f}"
                 ])
@@ -688,10 +688,10 @@ class MultiRouteSimulation:
                     "passenger_revenue":          r_pax_rev,
                     "contract_revenue":           r_cnt_rev,
                     "headway_mae_min":            route_mae,
-                    "opex":                       opex,
+                    "varex":                      opex,
                     "marginal_profit":            marginal_profit,
                     "profit_per_km":              profit_per_km,
-                    "ros_pct":                    ros,
+                    "cmr_pct":                    ros,
                     "failed_release_trips":       route.stats.failed_release_trips,
                     "failed_midpoint_trips":      route.stats.failed_midpoint_trips,
                     "lost_contract_revenue":      route.stats.lost_contract_revenue,
@@ -706,7 +706,7 @@ class MultiRouteSimulation:
             tot_rev = fwd_s["revenue"] + bwd_s["revenue"]
             tot_pax_rev = fwd_s["passenger_revenue"] + bwd_s["passenger_revenue"]
             tot_cnt_rev = fwd_s["contract_revenue"] + bwd_s["contract_revenue"]
-            tot_opex = fwd_s["opex"] + bwd_s["opex"]
+            tot_opex = fwd_s["varex"] + bwd_s["varex"]
             tot_margin = tot_rev - tot_opex
             tot_pax = fwd_s["passengers_estimated"] + bwd_s["passengers_estimated"]
             
@@ -760,13 +760,13 @@ class MultiRouteSimulation:
                 "passenger_revenue":          tot_pax_rev,
                 "contract_revenue":           tot_cnt_rev,
                 "headway_mae_min":            pair_mae,
-                "opex":                       tot_opex,
+                "varex":                      tot_opex,
                 "release_penalty":            release_penalty,
                 "midpoint_penalty":           midpoint_penalty,
                 "total_penalties":            tot_penalties,
                 "marginal_profit":            tot_margin - tot_penalties,
                 "profit_per_km":              (tot_margin - tot_penalties) / tot_km if tot_km > 0 else 0.0,
-                "ros_pct":                    ((tot_margin - tot_penalties) / tot_rev * 100) if tot_rev > 0 else 0.0,
+                "cmr_pct":                    ((tot_margin - tot_penalties) / tot_rev * 100) if tot_rev > 0 else 0.0,
                 "failed_release_trips":       tot_failed_release,
                 "failed_midpoint_trips":      tot_failed_midpoint,
                 "lost_contract_revenue":      tot_lost_contract,
@@ -777,7 +777,7 @@ class MultiRouteSimulation:
 
         # ── Глобальные агрегаты ────────────────────────────────────────────
         g_total_trips = sum(rs["total_trips"] for rs in routes_stats.values())
-        g_opex = sum(rs["opex"] for rs in routes_stats.values())
+        g_opex = sum(rs["varex"] for rs in routes_stats.values())
         g_passenger_revenue = sum(rs["passenger_revenue"] for rs in routes_stats.values())
         g_contract_revenue = sum(rs["contract_revenue"] for rs in routes_stats.values())
         g_total_trams = sum(len(p.all_trams) for p in self.pairs)
@@ -791,7 +791,7 @@ class MultiRouteSimulation:
         
         g_marginal_profit = total_revenue - g_opex - g_total_penalties
         g_profit_per_km = g_marginal_profit / total_km if total_km > 0 else 0.0
-        g_ros = (g_marginal_profit / total_revenue * 100) if total_revenue > 0 else 0.0
+        g_cmr = (g_marginal_profit / total_revenue * 100) if total_revenue > 0 else 0.0
 
         g_contract_trips = sum(rt["contract_trips"] for rt in route_totals.values())
         g_successful_trips = g_total_trips - g_failed_release
@@ -809,13 +809,13 @@ class MultiRouteSimulation:
                 "total_contract_revenue":  g_contract_revenue,
                 "total_passengers_est": total_pax_est,
                 "unique_stops":         len(self.shared_stops),
-                "opex":                 g_opex,
+                "varex":                g_opex,
                 "release_penalty":      g_release_penalty,
                 "midpoint_penalty":     g_midpoint_penalty,
                 "total_penalties":      g_total_penalties,
                 "marginal_profit":      g_marginal_profit,
                 "profit_per_km":        g_profit_per_km,
-                "ros_pct":              g_ros,
+                "cmr_pct":              g_cmr,
                 "total_trams":          g_total_trams,
                 "failed_release_trips": g_failed_release,
                 "failed_midpoint_trips": g_failed_midpoint,
@@ -853,10 +853,10 @@ class MultiRouteSimulation:
                     lines.append(f"  • Общая выручка:       {rs['revenue']:.0f} руб.")
                     lines.append(f"    - Выручка с пассажиров: {rs['passenger_revenue']:.0f} руб.")
                     lines.append(f"    - Выручка по контракту: {rs['contract_revenue']:.0f} руб.")
-                    lines.append(f"  • OpEx:                {rs['opex']:.0f} руб.")
+                    lines.append(f"  • VarEx:               {rs['varex']:.0f} руб.")
                     lines.append(f"  • Опер. результат:      {rs['marginal_profit']:.0f} руб.")
                     lines.append(f"  • Выручка/км:          {rs['profit_per_km']:.2f} руб.")
-                    lines.append(f"  • ROS:                 {rs['ros_pct']:.1f}%")
+                    lines.append(f"  • CMR:                 {rs['cmr_pct']:.1f}%")
                     lines.append(f"  • MAE интервалов:     {rs['headway_mae_min']:.2f} мин")
             
             rt = stats["route_totals"].get(pair.route_num)
@@ -872,14 +872,14 @@ class MultiRouteSimulation:
                 lines.append(f"  • Общая выручка:       {rt['revenue']:.0f} руб.")
                 lines.append(f"    - Выручка с пассажиров: {rt['passenger_revenue']:.0f} руб.")
                 lines.append(f"    - Выручка по контракту: {rt['contract_revenue']:.0f} руб.")
-                lines.append(f"  • OpEx:                {rt['opex']:.0f} руб.")
+                lines.append(f"  • VarEx:               {rt['varex']:.0f} руб.")
                 if rt.get('total_penalties', 0) > 0:
                     lines.append(f"  • Штрафы за несоблюдение выпуска: {rt['release_penalty']:.0f} руб.")
                     lines.append(f"  • Штрафы за серединные отклонения: {rt['midpoint_penalty']:.0f} руб.")
                     lines.append(f"  • Всего штрафов:      {rt['total_penalties']:.0f} руб.")
                 lines.append(f"  • Опер. результат:      {rt['marginal_profit']:.0f} руб.")
                 lines.append(f"  • Выручка/км:          {rt['profit_per_km']:.2f} руб.")
-                lines.append(f"  • ROS:                 {rt['ros_pct']:.1f}%")
+                lines.append(f"  • CMR:                 {rt['cmr_pct']:.1f}%")
                 lines.append(f"  • MAE интервалов:     {rt['headway_mae_min']:.2f} мин")
                 
         g = stats["global"]
@@ -892,14 +892,14 @@ class MultiRouteSimulation:
         lines.append(f"  • Общая выручка:       {g['total_revenue']:.0f} руб.")
         lines.append(f"    - Выручка с пассажиров: {g['total_passenger_revenue']:.0f} руб.")
         lines.append(f"    - Выручка по контракту: {g['total_contract_revenue']:.0f} руб.")
-        lines.append(f"  • Всего OpEx:        {g['opex']:.0f} руб.")
+        lines.append(f"  • Всего VarEx:       {g['varex']:.0f} руб.")
         if g.get('total_penalties', 0) > 0:
             lines.append(f"  • Всего штрафов за выпуск: {g['release_penalty']:.0f} руб.")
             lines.append(f"  • Всего штрафов за нарушение интервалов: {g['midpoint_penalty']:.0f} руб.")
             lines.append(f"  • Всего штрафов:      {g['total_penalties']:.0f} руб.")
         lines.append(f"  • Опер. результат:     {g['marginal_profit']:.0f} руб.")
         lines.append(f"  • Выручка/км:        {g['profit_per_km']:.2f} руб.")
-        lines.append(f"  • ROS:               {g['ros_pct']:.1f}%")
+        lines.append(f"  • CMR:               {g['cmr_pct']:.1f}%")
         lines.append(f"  • Пассажиры (расч.): {g['total_passengers_est']:.0f}")
         lines.append(f"  • MAE интервалов:     {g['headway_mae_min']:.2f} мин")
         lines.append(f"{'='*60}\n")
